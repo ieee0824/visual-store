@@ -25,7 +25,7 @@ The schema deliberately separates a captured observation from its current storag
 | `representations` | Exactly one active physical representation for an observation. Version 2 migrations create PNG representation version 1. |
 | `segments` | Immutable multi-frame codec objects and their codec descriptor. |
 | `frame_locations` | An observation's frame index and decode start within a segment. Bounds are enforced by checks and triggers. |
-| `png_reconstruction` | Versioned reconstruction metadata needed to reproduce a PNG from a non-PNG representation. |
+| `png_reconstruction` | Versioned reconstruction metadata needed to reproduce a PNG from a non-PNG representation. The descriptor is an immutable typed blob and may be shared by content hash. |
 | `blobs` | Immutable SHA-256-addressed bytes with an explicit object kind: PNG, VP9 bitstream, or PNG reconstruction descriptor. |
 | `retired_representations` | Superseded physical representations and their pruning state; observation rows are not replaced. |
 | `schema_migrations` | Durable history of explicit schema migrations. |
@@ -35,6 +35,8 @@ The schema deliberately separates a captured observation from its current storag
 The stored PNG preserves IHDR values, the byte-exact decompressed filtered scanlines, decoded RGB/RGBA samples including hidden color under transparent pixels, and every accepted non-IDAT chunk in content and relative order. IDAT boundaries and compressed bytes may change. Recompression uses the selected zlib level and is adopted only when the candidate is smaller and round-trip validation succeeds.
 
 Version 2 accepts static, non-interlaced, 8-bit RGB/RGBA PNG. It validates the PNG signature, chunk lengths and types, reserved bits, CRCs, critical ordering, contiguous IDAT stream, bounded zlib termination, filter bytes, and decoded samples. Unknown critical chunks and unknown ancillary chunks marked unsafe to copy are rejected. Accepted ancillary chunks are preserved and never interpreted as instructions.
+
+The canonical reconstruction descriptor is specified in [ADR 0002](adr/0002-png-reconstruction.md). It preserves original IHDR, every accepted non-IDAT chunk in order and on the same side of IDAT, plus one original filter type per row. After codec decode, Visual Store recreates filtered scanlines from packed samples and those filters, verifies the unchanged pixel, scanline, and non-IDAT hashes, rebuilds a PNG, and passes it through the same strict validator before publication. RGBA reconstruction includes alpha and nonzero hidden RGB beneath alpha zero. Rebuilt zlib bytes and IDAT boundaries are not required to match the pre-pack file; a retained source blob remains byte-identical.
 
 ## Blob publication order
 

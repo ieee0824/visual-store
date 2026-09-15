@@ -124,6 +124,48 @@ pub struct EncodedSequence {
     pub alpha_packets: Option<Vec<Packet>>,
 }
 
+/// Codec packet payload sizes. Container and reconstruction metadata overhead
+/// are deliberately separate and must be added by segment storage accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PayloadByteLengths {
+    /// Bytes in color packets.
+    pub color: u64,
+    /// Bytes in the optional lossless alpha packets.
+    pub alpha: u64,
+    /// Color plus alpha packet bytes.
+    pub total: u64,
+}
+
+impl EncodedSequence {
+    /// Return checked payload accounting that cannot omit a separate alpha stream.
+    pub fn payload_byte_lengths(&self) -> Result<PayloadByteLengths> {
+        let sum = |packets: &[Packet]| -> Result<u64> {
+            packets.iter().try_fold(0u64, |total, packet| {
+                let length = u64::try_from(packet.data.len())
+                    .map_err(|_| CodecError::input("packet byte length overflow"))?;
+                total
+                    .checked_add(length)
+                    .ok_or_else(|| CodecError::input("packet byte length overflow"))
+            })
+        };
+        let color = sum(&self.color_packets)?;
+        let alpha = self
+            .alpha_packets
+            .as_deref()
+            .map(sum)
+            .transpose()?
+            .unwrap_or(0);
+        let total = color
+            .checked_add(alpha)
+            .ok_or_else(|| CodecError::input("packet byte length overflow"))?;
+        Ok(PayloadByteLengths {
+            color,
+            alpha,
+            total,
+        })
+    }
+}
+
 /// Header information parsed by libvpx's decoder interface from a packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacketInfo {

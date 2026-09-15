@@ -24,7 +24,7 @@ cargo test --locked --offline --features fault-injection
 | T14 | Passed | Four child processes register concurrently without missing references and share one blob. |
 | T15 | Passed | Child processes are forcibly terminated before/after blob publication and before/during/after DB commit; committed records remain retrievable and incomplete records are absent. |
 | T16 | Passed with simulation | A real SQLite lock exercises the five-second timeout. Permission bits are tested as a non-root user. `ENOSPC` is injected at persistence boundaries; a physically full volume was not created. Existing records and inputs remain intact. |
-| T17 | Passed | Cursor paging excludes newly registered rows and returns each original row once. |
+| T17 | Passed | Cursor paging excludes newly registered rows and returns each original row once. Filtered paging retrieves a sparse old run from 30,000 newer records, and its query plan uses `images_by_run_seq`. |
 | T18 | Passed | Cross-store references and cursors, filter-mismatched cursors, malformed cursors, and invalid limits fail explicitly. |
 | T19 | Passed | Deleted and corrupted blobs make get/verify fail; no repair or deletion occurs. |
 | T20 | Passed | Existing files, valid symlinks, dangling symlinks, and a symlinked managed export directory are not overwritten or followed. |

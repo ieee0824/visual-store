@@ -18,6 +18,8 @@ const ENCODING: &str = "png-idat-zlib-v1";
 // Reserve space for the CLI success envelope and trailing newline so list stdout
 // stays within the documented 16 KiB budget.
 const LIST_DATA_BUDGET_BYTES: usize = 16 * 1024 - 64;
+const LIST_ALL_SQL: &str = "SELECT image_id,seq,run,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE seq<=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3";
+const LIST_RUN_SQL: &str = "SELECT image_id,seq,run,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE run=?1 AND seq<=?2 AND seq<?3 ORDER BY seq DESC LIMIT ?4";
 fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
@@ -498,6 +500,18 @@ impl Store {
         fault("after_db_commit")?;
         self.put_result(&id, reused, false)
     }
+    fn list_item(&self, row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
+        Ok(json!({
+            "ref": self.reference(&row.get::<_, String>(0)?),
+            "seq": row.get::<_, i64>(1)?,
+            "run": row.get::<_, Option<String>>(2)?,
+            "label": row.get::<_, Option<String>>(3)?,
+            "width": row.get::<_, u32>(4)?,
+            "height": row.get::<_, u32>(5)?,
+            "created_at": row.get::<_, String>(6)?,
+            "stored_bytes": row.get::<_, u64>(7)?,
+        }))
+    }
     pub fn list(&self, mut run: Option<String>, limit: u32, cursor: Option<&str>) -> Result<Value> {
         bounded(&mut run, 128)?;
         if !(1..=100).contains(&limit) {
@@ -533,9 +547,18 @@ impl Store {
                 last: i64::MAX,
             }
         };
-        let mut stmt = self.conn.prepare("SELECT image_id,seq,run,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE (?1 IS NULL OR run=?1) AND seq<=?2 AND seq<?3 ORDER BY seq DESC LIMIT ?4")?;
-        let rows = stmt.query_map(params![run,c.max,c.last,limit+1],|r| Ok(json!({"ref":self.reference(&r.get::<_,String>(0)?),"seq":r.get::<_,i64>(1)?,"run":r.get::<_,Option<String>>(2)?,"label":r.get::<_,Option<String>>(3)?,"width":r.get::<_,u32>(4)?,"height":r.get::<_,u32>(5)?,"created_at":r.get::<_,String>(6)?,"stored_bytes":r.get::<_,u64>(7)?})))?;
-        let candidates = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let candidates = if let Some(run) = run.as_deref() {
+            let mut stmt = self.conn.prepare(LIST_RUN_SQL)?;
+            let rows = stmt.query_map(params![run, c.max, c.last, limit + 1], |row| {
+                self.list_item(row)
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt = self.conn.prepare(LIST_ALL_SQL)?;
+            let rows =
+                stmt.query_map(params![c.max, c.last, limit + 1], |row| self.list_item(row))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
         let page = |items: &[Value], more: bool| -> Result<Value> {
             let mut result = json!({"items":items});
             if more {
@@ -783,4 +806,33 @@ struct Cursor {
     run: Option<String>,
     max: i64,
     last: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LIST_RUN_SQL;
+    use rusqlite::{Connection, params};
+
+    #[test]
+    fn filtered_list_query_uses_run_sequence_index() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/001.sql"))
+            .unwrap();
+        let mut statement = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {LIST_RUN_SQL}"))
+            .unwrap();
+        let plan = statement
+            .query_map(params!["rare", i64::MAX, i64::MAX, 21], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("images_by_run_seq") && detail.contains("run=?")),
+            "query plan did not use the run/sequence index: {plan:?}"
+        );
+    }
 }

@@ -1,5 +1,6 @@
 mod common;
 use common::*;
+use rusqlite::Connection;
 use std::{
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt, symlink},
@@ -192,6 +193,104 @@ fn pagination_is_stable_across_new_registrations_and_rejects_wrong_cursor() {
     other.error(&["list", "--cursor", cursor], "E_INVALID_CURSOR");
     let a = h.put();
     other.error(&["info", a["ref"].as_str().unwrap()], "E_STORE_MISMATCH");
+}
+
+#[test]
+fn sparse_old_run_pages_correctly_among_many_newer_records() {
+    let h = Harness::new();
+    h.init();
+    let mut store = Store::open(&h.root, true).unwrap();
+    let mut rare_refs = Vec::new();
+    for _ in 0..3 {
+        rare_refs.push(
+            store
+                .put(
+                    &h.input,
+                    PutOptions {
+                        run: Some("rare".into()),
+                        ..PutOptions::default()
+                    },
+                )
+                .unwrap()["ref"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    drop(store);
+
+    let connection = Connection::open(h.root.join("index.sqlite3")).unwrap();
+    connection
+        .execute_batch(
+            "WITH digits(n) AS (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)),
+             numbers(n) AS (
+                 SELECT a.n + 10*b.n + 100*c.n + 1000*d.n + 10000*e.n
+                 FROM digits a, digits b, digits c, digits d, digits e
+             )
+             INSERT INTO images(
+                 image_id,run,created_at,captured_at,label,note,tags_json,width,height,
+                 bit_depth,color_type,source_sha256,source_byte_length,stored_blob_sha256,
+                 source_blob_sha256,scanline_sha256,non_idat_sha256,pixel_sha256,
+                 encoding_version,compression_level,compression_applied,operation_id,
+                 operation_fingerprint,validation_limits_json
+             )
+             SELECT printf('10000000-0000-0000-0000-%012d',numbers.n),'common',
+                 template.created_at,template.captured_at,template.label,template.note,
+                 template.tags_json,template.width,template.height,template.bit_depth,
+                 template.color_type,template.source_sha256,template.source_byte_length,
+                 template.stored_blob_sha256,template.source_blob_sha256,
+                 template.scanline_sha256,template.non_idat_sha256,template.pixel_sha256,
+                 template.encoding_version,template.compression_level,
+                 template.compression_applied,NULL,NULL,template.validation_limits_json
+             FROM numbers CROSS JOIN images AS template
+             WHERE numbers.n BETWEEN 1 AND 30000 AND template.seq=1",
+        )
+        .unwrap();
+    drop(connection);
+
+    let store = Store::open(&h.root, false).unwrap();
+    let unfiltered = store.list(None, 2, None).unwrap();
+    assert_eq!(unfiltered["items"].as_array().unwrap().len(), 2);
+    assert!(
+        unfiltered["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["run"] == "common")
+    );
+    assert!(unfiltered.get("next_cursor").is_some());
+
+    let first = store.list(Some("rare".into()), 2, None).unwrap();
+    assert_eq!(
+        first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["ref"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![rare_refs[2].as_str(), rare_refs[1].as_str()]
+    );
+    let cursor = first["next_cursor"].as_str().unwrap().to_owned();
+    drop(store);
+    let mut store = Store::open(&h.root, true).unwrap();
+    let later = store
+        .put(
+            &h.input,
+            PutOptions {
+                run: Some("rare".into()),
+                ..PutOptions::default()
+            },
+        )
+        .unwrap();
+    drop(store);
+
+    let store = Store::open(&h.root, false).unwrap();
+    let second = store.list(Some("rare".into()), 2, Some(&cursor)).unwrap();
+    assert_eq!(second["items"][0]["ref"], rare_refs[0]);
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert!(second.get("next_cursor").is_none());
+    let fresh = store.list(Some("rare".into()), 1, None).unwrap();
+    assert_eq!(fresh["items"][0]["ref"], later["ref"]);
 }
 #[test]
 fn corrupt_or_missing_blob_is_detected_without_publishing_output() {

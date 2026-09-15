@@ -48,6 +48,8 @@ Options: `--run`, `--limit` from 1 through 100, and `--cursor`. Default limit is
 
 The opaque cursor binds store ID, run filter, the first page's maximum sequence, and the previous page boundary. A cursor from another store or filter fails with `E_INVALID_CURSOR`. Registrations made during paging do not enter that cursor series.
 
+Each successful `list` response is at most 16 KiB on stdout, including the JSON envelope and trailing newline. The byte budget is applied after JSON escaping. A page may therefore contain fewer items than `--limit`; when more matching items remain, `next_cursor` resumes after the last item actually returned without changing stored metadata.
+
 ### get
 
 Accepts a reference, optional `--variant stored|source`, and optional `--output PATH`. The default destination is a unique file under the store's `exports/` directory. `source` requires `--keep-source` at registration.

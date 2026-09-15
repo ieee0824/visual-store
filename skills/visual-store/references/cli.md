@@ -14,7 +14,7 @@ vstore [--store PATH] COMMAND
 | `init` | 未作成または空の専用ディレクトリを初期化。正常storeはIDを維持 |
 | `put --file PATH` | PNG登録。`--run`、`--label`、`--note`、複数の`--tag`、`--captured-at RFC3339`、`--operation-id`、`--keep-source`、`--compression-level 0..9` |
 | `info REF` | 寸法、メモ、タグ、ハッシュ、保存量、圧縮情報。完全性検査ではない |
-| `list [--run RUN] [--limit N] [--cursor CURSOR]` | 新しい登録順。既定20件、最大100件。次ページも同じrun条件を使う |
+| `list [--run RUN] [--limit N] [--cursor CURSOR]` | 新しい登録順。既定20件、最大100件。stdoutは最大16 KiBで、byte上限時は指定件数未満でもcursorを返す。次ページも同じrun条件を使う |
 | `get REF [--variant stored\|source] [--output PATH]` | PNGをコピーして絶対pathを返す。既定はexports配下。画像表示は行わない |
 | `verify [--report NEW_FILE]` | 整合性検査。要約と最大20件の問題例。全問題はreportへ書く |
 

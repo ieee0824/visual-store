@@ -8,7 +8,12 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use serde::{Deserialize, Serialize};
-use std::{ffi::CStr, fmt, os::raw::c_int, ptr};
+use std::{
+    ffi::CStr,
+    fmt,
+    os::raw::{c_int, c_ulong},
+    ptr,
+};
 use vpx_sys as ffi;
 
 const DESCRIPTOR_VERSION: u8 = 1;
@@ -305,7 +310,7 @@ impl Encoder {
                 pts,
                 1,
                 flags,
-                ffi::VPX_DL_GOOD_QUALITY as ffi::vpx_enc_deadline_t,
+                ffi::VPX_DL_GOOD_QUALITY as c_ulong,
             )
         };
         check("vpx_codec_encode", status, Some(&self.context))?;
@@ -323,7 +328,7 @@ impl Encoder {
                     -1,
                     1,
                     0,
-                    ffi::VPX_DL_GOOD_QUALITY as ffi::vpx_enc_deadline_t,
+                    ffi::VPX_DL_GOOD_QUALITY as c_ulong,
                 )
             };
             check("vpx_codec_encode(flush)", status, Some(&self.context))?;

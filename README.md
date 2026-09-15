@@ -38,6 +38,7 @@ vstore --store "$PWD/.visual-store" init
 vstore --store "$PWD/.visual-store" put \
   --file artifacts/render.png \
   --run ui-check-20260915-a \
+  --stream browser-main \
   --label input-border \
   --note "後で確認するため保存。画像はまだ見ていない。"
 
@@ -51,7 +52,7 @@ vstore --store "$PWD/.visual-store" verify
 
 storeの選択順は`--store PATH`、`VSTORE_ROOT`、`$CWD/.visual-store`です。親ディレクトリは探索しません。`.visual-store/`をGit管理に含めないでください。このリポジトリの`.gitignore`では除外済みです。
 
-入力と完全に同じバイト列を後で取得する必要がある場合は、`put --keep-source`を指定します。通常は検証済みの可逆保存版だけを保持します。再試行可能な登録には`--operation-id`を使います。同じ操作IDを異なる元画像やメタデータで再利用すると`E_CONFLICT`になります。
+`--run`を指定した観測には、`(run, stream)`ごとに0始まりの不変な`frame_no`が割り当てられます。`--stream`省略時は`default`です。入力と完全に同じバイト列を後で取得する必要がある場合は、`put --keep-source`を指定します。通常は検証済みの可逆保存版だけを保持します。再試行可能な登録には`--operation-id`を使います。同じ操作IDを異なる元画像やメタデータで再利用すると`E_CONFLICT`になります。
 
 完全な仕様は[CLIリファレンス](docs/cli.md)、[JSON Schema](docs/cli.schema.json)、[保存形式](docs/storage-format.md)を参照してください。
 
@@ -71,6 +72,8 @@ ln -s ../../skills/visual-store .agents/skills/visual-store
 ## バックアップと保守
 
 すべての`vstore`プロセスを終了し、storeディレクトリ全体をコピーしてから、コピー先で`vstore --store COPY verify`を実行してください。storeの使用中に`index.sqlite3`だけをコピーしないでください。MVPは画像レコード、blob、exports、一時的な孤立候補を自動削除しません。
+
+format version 1のstoreは読み取り専用で開けます。書き込み前に、全体バックアップを取得してから`vstore --store STORE migrate --to 2`を明示実行してください。中断時は通常操作が`E_MIGRATION_INCOMPLETE`で停止します。`--resume`で安全に再開するか、`--restore`でv1バックアップへ戻せます。
 
 storeディレクトリとファイルは、POSIX環境でそれぞれ`0700`と`0600`で作成します。既存の所有者や権限は変更しません。ネットワークファイルシステムと複数ホストからの同時利用はサポート対象外です。
 

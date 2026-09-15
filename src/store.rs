@@ -8,18 +8,32 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, TransactionBehavior, backup::Backup, params,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, io::Write, path::Path, time::Duration};
 use uuid::Uuid;
 
 const ENCODING: &str = "png-idat-zlib-v1";
+const CURRENT_FORMAT_VERSION: u32 = 2;
+const MIGRATION_JOURNAL: &str = "migration-v1-to-v2.json";
+const MIGRATION_BACKUP: &str = "migration-v1-backup.sqlite3";
+const MIGRATION_BACKUP_FILES: [&str; 4] = [
+    "migration-v1-backup.sqlite3-wal",
+    "migration-v1-backup.sqlite3-shm",
+    "migration-v1-backup.sqlite3-journal",
+    MIGRATION_BACKUP,
+];
 // Reserve space for the CLI success envelope and trailing newline so list stdout
 // stays within the documented 16 KiB budget.
 const LIST_DATA_BUDGET_BYTES: usize = 16 * 1024 - 64;
-const LIST_ALL_SQL: &str = "SELECT image_id,seq,run,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE seq<=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3";
-const LIST_RUN_SQL: &str = "SELECT image_id,seq,run,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE run=?1 AND seq<=?2 AND seq<?3 ORDER BY seq DESC LIMIT ?4";
+const LIST_ALL_SQL_V1: &str = "SELECT image_id,seq,run,NULL,NULL,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE seq<=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3";
+const LIST_RUN_SQL_V1: &str = "SELECT image_id,seq,run,NULL,NULL,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE run=?1 AND seq<=?2 AND seq<?3 ORDER BY seq DESC LIMIT ?4";
+const LIST_ALL_SQL_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.label,i.width,i.height,i.created_at,b.byte_length FROM images i JOIN representations r ON r.image_id=i.image_id AND r.representation_kind='png' JOIN blobs b ON b.sha256=r.png_blob_sha256 WHERE i.seq<=?1 AND i.seq<?2 ORDER BY i.seq DESC LIMIT ?3";
+const LIST_RUN_SQL_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.label,i.width,i.height,i.created_at,b.byte_length FROM images i JOIN representations r ON r.image_id=i.image_id AND r.representation_kind='png' JOIN blobs b ON b.sha256=r.png_blob_sha256 WHERE i.run=?1 AND i.seq<=?2 AND i.seq<?3 ORDER BY i.seq DESC LIMIT ?4";
+type PriorOperation = (String, String, u32, Option<String>, Option<String>);
 fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
@@ -31,9 +45,31 @@ struct Manifest {
     format_version: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MigrationState {
+    Started,
+    DbCommitted,
+    ManifestUpdated,
+    Restoring,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MigrationJournal {
+    journal_version: u32,
+    store_id: Uuid,
+    from_version: u32,
+    to_version: u32,
+    state: MigrationState,
+    backup_file: String,
+    started_at: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PutOptions {
     pub run: Option<String>,
+    pub stream: Option<String>,
     pub label: Option<String>,
     pub note: Option<String>,
     pub tags: Vec<String>,
@@ -47,6 +83,7 @@ impl Default for PutOptions {
     fn default() -> Self {
         Self {
             run: None,
+            stream: None,
             label: None,
             note: None,
             tags: vec![],
@@ -73,6 +110,24 @@ fn bounded(value: &mut Option<String>, max: usize) -> Result<()> {
 impl PutOptions {
     fn normalize(&mut self) -> Result<()> {
         bounded(&mut self.run, 128)?;
+        if self.stream.as_ref().is_some_and(|stream| stream.is_empty()) {
+            return Err(invalid("Stream requires 1–128 UTF-8 bytes."));
+        }
+        if self
+            .stream
+            .as_ref()
+            .is_some_and(|stream| stream.len() > 128)
+        {
+            return Err(Error::new(
+                "E_LIMIT_EXCEEDED",
+                "Stream exceeds the 128-byte limit.",
+            ));
+        }
+        match (&self.run, &self.stream) {
+            (Some(_), None) => self.stream = Some("default".into()),
+            (None, Some(_)) => return Err(invalid("Stream requires --run.")),
+            _ => {}
+        }
         bounded(&mut self.label, 256)?;
         bounded(&mut self.note, 2048)?;
         if self.tags.len() > 16 || self.tags.iter().any(|t| t.is_empty() || t.len() > 64) {
@@ -103,6 +158,7 @@ impl PutOptions {
         }
         if serde_json::to_vec(&json!([
             self.run,
+            self.stream,
             self.label,
             self.note,
             self.tags,
@@ -118,12 +174,27 @@ impl PutOptions {
         }
         self.limits.validate()
     }
-    fn fingerprint(&self, source: &str) -> Result<String> {
+    fn fingerprint_v1(&self, source: &str) -> Result<String> {
         // A versioned JSON array gives unambiguous field boundaries and stable ordering.
         Ok(sha256(&serde_json::to_vec(&json!([
             1,
             source,
             self.run,
+            self.label,
+            self.note,
+            self.tags,
+            self.captured_at,
+            self.keep_source,
+            self.compression_level
+        ]))?))
+    }
+
+    fn fingerprint_v2(&self, source: &str) -> Result<String> {
+        Ok(sha256(&serde_json::to_vec(&json!([
+            2,
+            source,
+            self.run,
+            self.stream,
             self.label,
             self.note,
             self.tags,
@@ -139,6 +210,8 @@ pub struct ImageRecord {
     pub image_id: String,
     pub seq: i64,
     pub run: Option<String>,
+    pub stream: Option<String>,
+    pub frame_no: Option<u64>,
     pub created_at: String,
     pub captured_at: Option<String>,
     pub label: Option<String>,
@@ -162,37 +235,40 @@ pub struct ImageRecord {
     #[serde(skip)]
     source_blob: Option<String>,
 }
-const SELECT_IMAGE: &str = "SELECT i.image_id,i.seq,i.run,i.created_at,i.captured_at,i.label,i.note,i.tags_json,i.width,i.height,i.bit_depth,i.color_type,i.source_sha256,i.source_byte_length,i.stored_blob_sha256,b.byte_length,i.source_blob_sha256,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,i.encoding_version,i.compression_level,i.compression_applied FROM images i JOIN blobs b ON b.sha256=i.stored_blob_sha256";
+const SELECT_IMAGE_V1: &str = "SELECT i.image_id,i.seq,i.run,NULL,NULL,i.created_at,i.captured_at,i.label,i.note,i.tags_json,i.width,i.height,i.bit_depth,i.color_type,i.source_sha256,i.source_byte_length,i.stored_blob_sha256,b.byte_length,i.source_blob_sha256,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,i.encoding_version,i.compression_level,i.compression_applied FROM images i JOIN blobs b ON b.sha256=i.stored_blob_sha256";
+const SELECT_IMAGE_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.created_at,i.captured_at,i.label,i.note,i.tags_json,i.width,i.height,i.bit_depth,i.color_type,i.source_sha256,i.source_byte_length,r.png_blob_sha256,b.byte_length,i.source_blob_sha256,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,r.encoding_version,r.compression_level,r.compression_applied FROM images i JOIN representations r ON r.image_id=i.image_id AND r.representation_kind='png' JOIN blobs b ON b.sha256=r.png_blob_sha256";
 fn row_image(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
-    let tags: String = r.get(7)?;
-    let source_blob: Option<String> = r.get(16)?;
+    let tags: String = r.get(9)?;
+    let source_blob: Option<String> = r.get(18)?;
     Ok(ImageRecord {
         image_id: r.get(0)?,
         seq: r.get(1)?,
         run: r.get(2)?,
-        created_at: r.get(3)?,
-        captured_at: r.get(4)?,
-        label: r.get(5)?,
-        note: r.get(6)?,
+        stream: r.get(3)?,
+        frame_no: r.get(4)?,
+        created_at: r.get(5)?,
+        captured_at: r.get(6)?,
+        label: r.get(7)?,
+        note: r.get(8)?,
         tags: serde_json::from_str(&tags).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, Box::new(e))
         })?,
-        width: r.get(8)?,
-        height: r.get(9)?,
-        bit_depth: r.get(10)?,
-        color_type: r.get(11)?,
-        source_sha256: r.get(12)?,
-        source_bytes: r.get(13)?,
-        stored_sha256: r.get(14)?,
-        stored_bytes: r.get(15)?,
+        width: r.get(10)?,
+        height: r.get(11)?,
+        bit_depth: r.get(12)?,
+        color_type: r.get(13)?,
+        source_sha256: r.get(14)?,
+        source_bytes: r.get(15)?,
+        stored_sha256: r.get(16)?,
+        stored_bytes: r.get(17)?,
         source_retained: source_blob.is_some(),
         source_blob,
-        scanline_sha256: r.get(17)?,
-        non_idat_sha256: r.get(18)?,
-        pixel_sha256: r.get(19)?,
-        encoding_version: r.get(20)?,
-        compression_level: r.get(21)?,
-        compression_applied: r.get(22)?,
+        scanline_sha256: r.get(19)?,
+        non_idat_sha256: r.get(20)?,
+        pixel_sha256: r.get(21)?,
+        encoding_version: r.get(22)?,
+        compression_level: r.get(23)?,
+        compression_applied: r.get(24)?,
     })
 }
 
@@ -200,6 +276,7 @@ pub struct Store {
     conn: Connection,
     root: Dir,
     id: Uuid,
+    format_version: u32,
     pub limits: Limits,
 }
 fn connect(root: &Dir, writable: bool) -> Result<Connection> {
@@ -228,17 +305,52 @@ fn manifest(root: &Dir) -> Result<Manifest> {
         )
     })?;
     let m: Manifest = serde_json::from_slice(&filesystem::read_bounded(&mut f, 4096)?)?;
-    if m.format_version != 1 {
+    if !matches!(m.format_version, 1 | CURRENT_FORMAT_VERSION) {
         return Err(Error::new("E_SCHEMA_VERSION", "Unsupported store format."));
     }
     Ok(m)
 }
+fn database_version(c: &Connection) -> Result<u32> {
+    Ok(c.pragma_query_value(None, "user_version", |row| row.get(0))?)
+}
+fn migration_journal(root: &Dir) -> Result<Option<MigrationJournal>> {
+    let mut file = match root.open_file(MIGRATION_JOURNAL) {
+        Ok(file) => file,
+        Err(error)
+            if error.code == "E_IO"
+                && !root
+                    .path
+                    .join(MIGRATION_JOURNAL)
+                    .try_exists()
+                    .unwrap_or(true) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let journal: MigrationJournal =
+        serde_json::from_slice(&filesystem::read_bounded(&mut file, 4096)?)?;
+    if journal.journal_version != 1
+        || journal.from_version != 1
+        || journal.to_version != CURRENT_FORMAT_VERSION
+        || journal.backup_file != MIGRATION_BACKUP
+    {
+        return Err(integrity("Invalid migration journal."));
+    }
+    Ok(Some(journal))
+}
+fn migration_incomplete() -> Error {
+    Error::new(
+        "E_MIGRATION_INCOMPLETE",
+        "Store migration is incomplete; run migrate --to 2 --resume or --restore.",
+    )
+}
 fn check_store(root: &Dir, c: &Connection, m: &Manifest) -> Result<()> {
-    let v: u32 = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if v != 1 {
+    let version = database_version(c)?;
+    if version != m.format_version || !matches!(version, 1 | CURRENT_FORMAT_VERSION) {
         return Err(Error::new(
             "E_SCHEMA_VERSION",
-            "Unsupported database schema.",
+            "Manifest and database schema versions are unsupported or inconsistent.",
         ));
     }
     let id: String = c.query_row(
@@ -263,21 +375,310 @@ fn check_store(root: &Dir, c: &Connection, m: &Manifest) -> Result<()> {
     Ok(())
 }
 
+fn write_json_atomic<T: Serialize>(root: &Dir, name: &str, value: &T) -> Result<()> {
+    let mut temporary = Temp::new(root)?;
+    temporary.file.write_all(&serde_json::to_vec(value)?)?;
+    temporary.replace(root, name)
+}
+
+fn write_manifest(root: &Dir, manifest: &Manifest) -> Result<()> {
+    write_json_atomic(root, "store.json", manifest)
+}
+
+fn write_migration_journal(root: &Dir, journal: &MigrationJournal) -> Result<()> {
+    write_json_atomic(root, MIGRATION_JOURNAL, journal)
+}
+
+fn validate_v1_backup(path: &Path, expected_store_id: Uuid) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_file() || std::os::unix::fs::MetadataExt::nlink(&metadata) != 1 {
+        return Err(integrity("Unsafe migration backup path."));
+    }
+    let backup = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    if database_version(&backup)? != 1 {
+        return Err(integrity(
+            "Migration backup has an unexpected schema version.",
+        ));
+    }
+    let store_id: String = backup.query_row(
+        "SELECT value FROM store_meta WHERE key='store_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    if store_id != expected_store_id.to_string() {
+        return Err(integrity("Migration backup belongs to another store."));
+    }
+    let integrity_result: String =
+        backup.pragma_query_value(None, "integrity_check", |row| row.get(0))?;
+    if integrity_result != "ok" {
+        return Err(integrity("Migration backup failed SQLite integrity check."));
+    }
+    Ok(())
+}
+
+fn remove_migration_backup(root: &Dir) -> Result<()> {
+    for name in MIGRATION_BACKUP_FILES {
+        root.remove_file_if_exists(name)?;
+    }
+    Ok(())
+}
+
+fn create_v1_backup(root: &Dir, source: &Connection, store_id: Uuid) -> Result<()> {
+    remove_migration_backup(root)?;
+    drop(root.new_file(MIGRATION_BACKUP)?);
+    let mut destination = Connection::open_with_flags(
+        root.path.join(MIGRATION_BACKUP),
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    Backup::new(source, &mut destination)?.run_to_completion(
+        100,
+        Duration::from_millis(10),
+        None,
+    )?;
+    drop(destination);
+    root.open_file(MIGRATION_BACKUP)?.sync_all()?;
+    root.sync()?;
+    validate_v1_backup(&root.path.join(MIGRATION_BACKUP), store_id)
+}
+
+fn apply_v2_schema(connection: &mut Connection, journal: &MigrationJournal) -> Result<()> {
+    connection.pragma_update(None, "foreign_keys", false)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(include_str!("../migrations/001-to-002-prepare.sql"))?;
+    transaction.execute_batch(include_str!("../migrations/002.sql"))?;
+    transaction.execute_batch(include_str!("../migrations/001-to-002-copy.sql"))?;
+    transaction.execute(
+        "INSERT INTO schema_migrations(from_version,to_version,started_at,completed_at,backup_file) VALUES (1,2,?1,NULL,?2)",
+        params![journal.started_at, journal.backup_file],
+    )?;
+    let foreign_key_errors: i64 =
+        transaction.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })?;
+    if foreign_key_errors != 0 {
+        return Err(integrity(
+            "Migrated database failed foreign-key validation.",
+        ));
+    }
+    transaction.commit()?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    Ok(())
+}
+
+fn restore_v1(
+    root: &Dir,
+    connection: &mut Connection,
+    manifest_value: &mut Manifest,
+    journal: &mut MigrationJournal,
+) -> Result<Value> {
+    let restored_from_version = database_version(connection)?;
+    validate_v1_backup(&root.path.join(MIGRATION_BACKUP), journal.store_id)?;
+    journal.state = MigrationState::Restoring;
+    write_migration_journal(root, journal)?;
+    fault("migration_restore_started")?;
+    let backup_connection = Connection::open_with_flags(
+        root.path.join(MIGRATION_BACKUP),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    Backup::new(&backup_connection, connection)?.run_to_completion(
+        100,
+        Duration::from_millis(10),
+        None,
+    )?;
+    drop(backup_connection);
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "synchronous", "FULL")?;
+    fault("migration_restore_after_db")?;
+    manifest_value.format_version = 1;
+    write_manifest(root, manifest_value)?;
+    fault("migration_restore_after_manifest")?;
+    root.remove_file_if_exists(MIGRATION_JOURNAL)?;
+    fault("migration_restore_after_journal_cleanup")?;
+    remove_migration_backup(root)?;
+    fault("migration_restore_after_cleanup")?;
+    Ok(json!({
+        "store_id": journal.store_id,
+        "from_version": restored_from_version,
+        "to_version": 1,
+        "migrated": false,
+        "resumed": true,
+        "restored": true
+    }))
+}
+
 impl Store {
+    pub fn migrate(path: &Path, to: u32, resume: bool, restore: bool) -> Result<Value> {
+        if to != CURRENT_FORMAT_VERSION {
+            return Err(invalid("Only migration target 2 is supported."));
+        }
+        if resume && restore {
+            return Err(invalid("Choose either --resume or --restore."));
+        }
+        if !path.try_exists()? {
+            return Err(Error::new(
+                "E_STORE_NOT_INITIALIZED",
+                "Initialize the selected store first.",
+            ));
+        }
+        let root = Dir::open(path)?;
+        root.lock(true)?;
+        root.check_sqlite_paths()?;
+        let mut manifest_value = manifest(&root)?;
+        let mut connection = connect(&root, true)?;
+        let mut journal = migration_journal(&root)?;
+        let initial_version = database_version(&connection)?;
+
+        if journal.is_some() && !resume && !restore {
+            return Err(migration_incomplete());
+        }
+        if restore && journal.is_none() {
+            if manifest_value.format_version == 1
+                && initial_version == 1
+                && root.path.join(MIGRATION_BACKUP).try_exists()?
+            {
+                validate_v1_backup(&root.path.join(MIGRATION_BACKUP), manifest_value.store_id)?;
+                remove_migration_backup(&root)?;
+                return Ok(json!({
+                    "store_id": manifest_value.store_id,
+                    "from_version": 1,
+                    "to_version": 1,
+                    "migrated": false,
+                    "resumed": true,
+                    "restored": true
+                }));
+            }
+            return Err(invalid("There is no incomplete migration to restore."));
+        }
+
+        if journal.is_none()
+            && manifest_value.format_version == CURRENT_FORMAT_VERSION
+            && initial_version == CURRENT_FORMAT_VERSION
+        {
+            return Ok(json!({
+                "store_id": manifest_value.store_id,
+                "from_version": CURRENT_FORMAT_VERSION,
+                "to_version": CURRENT_FORMAT_VERSION,
+                "migrated": false,
+                "resumed": false,
+                "restored": false
+            }));
+        }
+        if journal.is_none() && (manifest_value.format_version != 1 || initial_version != 1) {
+            return Err(migration_incomplete());
+        }
+
+        if journal.is_none() {
+            create_v1_backup(&root, &connection, manifest_value.store_id)?;
+            fault("migration_after_backup")?;
+            let started = MigrationJournal {
+                journal_version: 1,
+                store_id: manifest_value.store_id,
+                from_version: 1,
+                to_version: CURRENT_FORMAT_VERSION,
+                state: MigrationState::Started,
+                backup_file: MIGRATION_BACKUP.into(),
+                started_at: now(),
+            };
+            write_migration_journal(&root, &started)?;
+            fault("migration_after_journal")?;
+            journal = Some(started);
+        }
+
+        let mut journal = journal.expect("migration journal was initialized");
+        if journal.store_id != manifest_value.store_id {
+            return Err(integrity(
+                "Migration journal store ID differs from manifest.",
+            ));
+        }
+        if restore {
+            return restore_v1(&root, &mut connection, &mut manifest_value, &mut journal);
+        }
+
+        let database_version = database_version(&connection)?;
+        match database_version {
+            1 => {
+                if manifest_value.format_version != 1 {
+                    return Err(migration_incomplete());
+                }
+                validate_v1_backup(&root.path.join(MIGRATION_BACKUP), journal.store_id)?;
+                fault("migration_before_db_commit")?;
+                apply_v2_schema(&mut connection, &journal)?;
+                fault("migration_after_db_commit")?;
+            }
+            CURRENT_FORMAT_VERSION => {}
+            _ => return Err(migration_incomplete()),
+        }
+        journal.state = MigrationState::DbCommitted;
+        write_migration_journal(&root, &journal)?;
+        fault("migration_after_db_journal")?;
+
+        match manifest_value.format_version {
+            1 => {
+                manifest_value.format_version = CURRENT_FORMAT_VERSION;
+                write_manifest(&root, &manifest_value)?;
+                fault("migration_after_manifest")?;
+            }
+            CURRENT_FORMAT_VERSION => {}
+            _ => return Err(migration_incomplete()),
+        }
+        journal.state = MigrationState::ManifestUpdated;
+        write_migration_journal(&root, &journal)?;
+        fault("migration_after_manifest_journal")?;
+
+        let history_completion: Option<Option<String>> = connection
+            .query_row(
+                "SELECT completed_at FROM schema_migrations ORDER BY migration_id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match history_completion {
+            Some(None) => {
+                connection.execute(
+                    "UPDATE schema_migrations SET completed_at=?1 WHERE migration_id=(SELECT MAX(migration_id) FROM schema_migrations)",
+                    [now()],
+                )?;
+            }
+            Some(Some(_)) => {}
+            None => return Err(integrity("Migration history is missing.")),
+        }
+        fault("migration_before_cleanup")?;
+        remove_migration_backup(&root)?;
+        fault("migration_after_backup_cleanup")?;
+        root.remove_file_if_exists(MIGRATION_JOURNAL)?;
+        fault("migration_after_cleanup")?;
+        Ok(json!({
+            "store_id": manifest_value.store_id,
+            "from_version": 1,
+            "to_version": CURRENT_FORMAT_VERSION,
+            "migrated": true,
+            "resumed": resume,
+            "restored": false
+        }))
+    }
+
     pub fn initialize(path: &Path) -> Result<Value> {
         let root = Dir::create_root(path)?;
         root.lock(true)?;
         if fs::read_dir(&root.path)?.next().is_some() {
+            if migration_journal(&root)?.is_some() {
+                return Err(migration_incomplete());
+            }
             let m = manifest(&root)?;
             let c = connect(&root, false)?;
             check_store(&root, &c, &m)?;
-            return Ok(
-                json!({"store_id":m.store_id,"schema_version":1,"already_initialized":true}),
-            );
+            return Ok(json!({
+                "store_id":m.store_id,
+                "schema_version":m.format_version,
+                "already_initialized":true
+            }));
         }
         let m = Manifest {
             store_id: Uuid::new_v4(),
-            format_version: 1,
+            format_version: CURRENT_FORMAT_VERSION,
         };
         root.child("objects", true)?.child("sha256", true)?;
         root.child("tmp", true)?;
@@ -286,7 +687,8 @@ impl Store {
         let mut c = connect(&root, true)?;
         c.pragma_update(None, "journal_mode", "WAL")?;
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute_batch(include_str!("../migrations/001.sql"))?;
+        tx.execute_batch("CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
+        tx.execute_batch(include_str!("../migrations/002.sql"))?;
         tx.execute(
             "INSERT INTO store_meta VALUES ('store_id',?1)",
             [m.store_id.to_string()],
@@ -299,7 +701,9 @@ impl Store {
             return Err(integrity("Manifest unexpectedly exists."));
         }
         root.sync()?;
-        Ok(json!({"store_id":m.store_id,"schema_version":1,"already_initialized":false}))
+        Ok(
+            json!({"store_id":m.store_id,"schema_version":CURRENT_FORMAT_VERSION,"already_initialized":false}),
+        )
     }
     pub fn open(path: &Path, writable: bool) -> Result<Self> {
         if !path.try_exists()? {
@@ -316,13 +720,23 @@ impl Store {
                 "Initialize the selected store first.",
             ));
         }
+        if migration_journal(&root)?.is_some() {
+            return Err(migration_incomplete());
+        }
         let m = manifest(&root)?;
+        if writable && m.format_version == 1 {
+            return Err(Error::new(
+                "E_SCHEMA_VERSION",
+                "Version 1 stores are read-only; run migrate --to 2.",
+            ));
+        }
         let conn = connect(&root, writable)?;
         check_store(&root, &conn, &m)?;
         Ok(Self {
             conn,
             root,
             id: m.store_id,
+            format_version: m.format_version,
             limits: Limits::default(),
         })
     }
@@ -354,12 +768,13 @@ impl Store {
             .to_string())
     }
     fn record(&self, id: &str) -> Result<ImageRecord> {
+        let select = if self.format_version == 1 {
+            SELECT_IMAGE_V1
+        } else {
+            SELECT_IMAGE_V2
+        };
         self.conn
-            .query_row(
-                &format!("{SELECT_IMAGE} WHERE i.image_id=?1"),
-                [id],
-                row_image,
-            )
+            .query_row(&format!("{select} WHERE i.image_id=?1"), [id], row_image)
             .optional()?
             .ok_or_else(|| Error::new("E_NOT_FOUND", "Image reference not found."))
     }
@@ -417,7 +832,7 @@ impl Store {
     fn put_result(&self, id: &str, blob_reused: bool, record_reused: bool) -> Result<Value> {
         let r = self.record(id)?;
         Ok(
-            json!({"ref":self.reference(&r.image_id),"image_id":r.image_id,"run":r.run,"seq":r.seq,
+            json!({"ref":self.reference(&r.image_id),"image_id":r.image_id,"run":r.run,"stream":r.stream,"frame_no":r.frame_no,"seq":r.seq,
             "width":r.width,"height":r.height,"source_bytes":r.source_bytes,"stored_bytes":r.stored_bytes,
             "source_retained":r.source_retained,"blob_reused":blob_reused,"record_reused":record_reused,"compression_applied":r.compression_applied}),
         )
@@ -428,18 +843,37 @@ impl Store {
         let read_budget = opts.limits.memory_bytes.saturating_sub(16 * 1024 * 1024) / 3;
         let bytes = filesystem::snapshot(source, &tmp, opts.limits.source_bytes.min(read_budget))?;
         let source_hash = sha256(&bytes);
-        let fingerprint = opts.fingerprint(&source_hash)?;
+        let fingerprint_v1 = opts.fingerprint_v1(&source_hash)?;
+        let fingerprint_v2 = opts.fingerprint_v2(&source_hash)?;
+        let matches_prior =
+            |fingerprint: &str, version: u32, run: &Option<String>, stream: &Option<String>| {
+                run == &opts.run
+                    && stream == &opts.stream
+                    && match version {
+                        1 => fingerprint == fingerprint_v1,
+                        2 => fingerprint == fingerprint_v2,
+                        _ => false,
+                    }
+            };
         if let Some(op) = &opts.operation_id {
-            let prior: Option<(String, String)> = self
+            let prior: Option<PriorOperation> = self
                 .conn
                 .query_row(
-                    "SELECT image_id,operation_fingerprint FROM images WHERE operation_id=?1",
+                    "SELECT image_id,operation_fingerprint,operation_fingerprint_version,run,stream FROM images WHERE operation_id=?1",
                     [op],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            if let Some((id, fp)) = prior {
-                if fp != fingerprint {
+            if let Some((id, fingerprint, version, run, stream)) = prior {
+                if !matches_prior(&fingerprint, version, &run, &stream) {
                     return Err(Error::new(
                         "E_CONFLICT",
                         "Operation ID has different registration content.",
@@ -463,15 +897,23 @@ impl Store {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(op) = &opts.operation_id {
-            let prior: Option<(String, String)> = tx
+            let prior: Option<PriorOperation> = tx
                 .query_row(
-                    "SELECT image_id,operation_fingerprint FROM images WHERE operation_id=?1",
+                    "SELECT image_id,operation_fingerprint,operation_fingerprint_version,run,stream FROM images WHERE operation_id=?1",
                     [op],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
                 )
                 .optional()?;
-            if let Some((id, fp)) = prior {
-                if fp != fingerprint {
+            if let Some((id, fingerprint, version, run, stream)) = prior {
+                if !matches_prior(&fingerprint, version, &run, &stream) {
                     return Err(Error::new(
                         "E_CONFLICT",
                         "Operation ID has different registration content.",
@@ -486,15 +928,25 @@ impl Store {
             .chain(source_blob.as_ref().map(|h| (h, bytes.len())))
         {
             let relative = Self::blob_path(hash);
-            tx.execute("INSERT INTO blobs(sha256,relative_path,byte_length,media_type,created_at) VALUES (?1,?2,?3,'image/png',?4) ON CONFLICT(sha256) DO NOTHING",params![hash,relative,n as u64,created])?;
-            let valid: bool = tx.query_row("SELECT relative_path=?2 AND byte_length=?3 AND media_type='image/png' FROM blobs WHERE sha256=?1",params![hash,relative,n as u64],|r|r.get(0))?;
+            tx.execute("INSERT INTO blobs(sha256,relative_path,byte_length,media_type,object_kind,created_at) VALUES (?1,?2,?3,'image/png','png',?4) ON CONFLICT(sha256) DO NOTHING",params![hash,relative,n as u64,created])?;
+            let valid: bool = tx.query_row("SELECT relative_path=?2 AND byte_length=?3 AND media_type='image/png' AND object_kind='png' FROM blobs WHERE sha256=?1",params![hash,relative,n as u64],|r|r.get(0))?;
             if !valid {
                 return Err(integrity("Existing blob metadata differs."));
             }
         }
         let id = Uuid::new_v4().to_string();
         let m = &packed.meta;
-        tx.execute("INSERT INTO images(image_id,run,created_at,captured_at,label,note,tags_json,width,height,bit_depth,color_type,source_sha256,source_byte_length,stored_blob_sha256,source_blob_sha256,scanline_sha256,non_idat_sha256,pixel_sha256,encoding_version,compression_level,compression_applied,operation_id,operation_fingerprint,validation_limits_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",params![id,opts.run,created,opts.captured_at,opts.label,opts.note,serde_json::to_string(&opts.tags)?,m.width,m.height,m.bit_depth,m.color_type,source_hash,bytes.len() as u64,stored_hash,source_blob,m.scanline_sha256,m.non_idat_sha256,m.pixel_sha256,ENCODING,opts.compression_level,packed.compression_applied,opts.operation_id,fingerprint,serde_json::to_string(&opts.limits)?])?;
+        let frame_no: Option<i64> = match (&opts.run, &opts.stream) {
+            (Some(run), Some(stream)) => Some(tx.query_row(
+                "SELECT COALESCE(MAX(frame_no),-1)+1 FROM images WHERE run=?1 AND stream=?2",
+                params![run, stream],
+                |row| row.get(0),
+            )?),
+            (None, None) => None,
+            _ => return Err(integrity("Normalized run/stream state is inconsistent.")),
+        };
+        tx.execute("INSERT INTO images(image_id,run,stream,frame_no,created_at,captured_at,label,note,tags_json,width,height,bit_depth,color_type,source_sha256,source_byte_length,source_blob_sha256,scanline_sha256,non_idat_sha256,pixel_sha256,operation_id,operation_fingerprint,operation_fingerprint_version,validation_limits_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,2,?22)",params![id,opts.run,opts.stream,frame_no,created,opts.captured_at,opts.label,opts.note,serde_json::to_string(&opts.tags)?,m.width,m.height,m.bit_depth,m.color_type,source_hash,bytes.len() as u64,source_blob,m.scanline_sha256,m.non_idat_sha256,m.pixel_sha256,opts.operation_id,fingerprint_v2,serde_json::to_string(&opts.limits)?])?;
+        tx.execute("INSERT INTO representations(image_id,representation_version,representation_kind,png_blob_sha256,segment_id,encoding_version,compression_level,compression_applied,created_at,verified_at) VALUES (?1,1,'png',?2,NULL,?3,?4,?5,?6,?6)",params![id,stored_hash,ENCODING,opts.compression_level,packed.compression_applied,created])?;
         fault("during_db_commit")?;
         tx.commit()?;
         fault("after_db_commit")?;
@@ -505,11 +957,13 @@ impl Store {
             "ref": self.reference(&row.get::<_, String>(0)?),
             "seq": row.get::<_, i64>(1)?,
             "run": row.get::<_, Option<String>>(2)?,
-            "label": row.get::<_, Option<String>>(3)?,
-            "width": row.get::<_, u32>(4)?,
-            "height": row.get::<_, u32>(5)?,
-            "created_at": row.get::<_, String>(6)?,
-            "stored_bytes": row.get::<_, u64>(7)?,
+            "stream": row.get::<_, Option<String>>(3)?,
+            "frame_no": row.get::<_, Option<u64>>(4)?,
+            "label": row.get::<_, Option<String>>(5)?,
+            "width": row.get::<_, u32>(6)?,
+            "height": row.get::<_, u32>(7)?,
+            "created_at": row.get::<_, String>(8)?,
+            "stored_bytes": row.get::<_, u64>(9)?,
         }))
     }
     pub fn list(&self, mut run: Option<String>, limit: u32, cursor: Option<&str>) -> Result<Value> {
@@ -547,14 +1001,19 @@ impl Store {
                 last: i64::MAX,
             }
         };
+        let (all_sql, run_sql) = if self.format_version == 1 {
+            (LIST_ALL_SQL_V1, LIST_RUN_SQL_V1)
+        } else {
+            (LIST_ALL_SQL_V2, LIST_RUN_SQL_V2)
+        };
         let candidates = if let Some(run) = run.as_deref() {
-            let mut stmt = self.conn.prepare(LIST_RUN_SQL)?;
+            let mut stmt = self.conn.prepare(run_sql)?;
             let rows = stmt.query_map(params![run, c.max, c.last, limit + 1], |row| {
                 self.list_item(row)
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         } else {
-            let mut stmt = self.conn.prepare(LIST_ALL_SQL)?;
+            let mut stmt = self.conn.prepare(all_sql)?;
             let rows =
                 stmt.query_map(params![c.max, c.last, limit + 1], |row| self.list_item(row))?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
@@ -709,9 +1168,16 @@ impl Store {
                     return Err(integrity("Blob metadata mismatch."));
                 }
                 let meta = image::validate(&bytes, &self.limits)?;
-                let mut images = tx.prepare(&format!(
-                    "{SELECT_IMAGE} WHERE i.stored_blob_sha256=?1 OR i.source_blob_sha256=?1"
-                ))?;
+                let image_query = if self.format_version == 1 {
+                    format!(
+                        "{SELECT_IMAGE_V1} WHERE i.stored_blob_sha256=?1 OR i.source_blob_sha256=?1"
+                    )
+                } else {
+                    format!(
+                        "{SELECT_IMAGE_V2} WHERE r.png_blob_sha256=?1 OR i.source_blob_sha256=?1"
+                    )
+                };
+                let mut images = tx.prepare(&image_query)?;
                 for r in images.query_map([&hash], row_image)? {
                     let r = r?;
                     if (r.width, r.height, r.bit_depth, r.color_type)
@@ -766,7 +1232,13 @@ impl Store {
                         record_issue(json!({"code":"unexpected_object_entry"}), true)?;
                         continue;
                     }
-                    let referenced: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM images WHERE stored_blob_sha256=?1 OR source_blob_sha256=?1)",[hash],|r|r.get(0))?;
+                    let reference_query = if self.format_version == 1 {
+                        "SELECT EXISTS(SELECT 1 FROM images WHERE stored_blob_sha256=?1 OR source_blob_sha256=?1)"
+                    } else {
+                        "SELECT EXISTS(SELECT 1 FROM images i LEFT JOIN representations r ON r.image_id=i.image_id WHERE r.png_blob_sha256=?1 OR i.source_blob_sha256=?1)"
+                    };
+                    let referenced: bool =
+                        tx.query_row(reference_query, [hash], |row| row.get(0))?;
                     if !referenced {
                         record_issue(
                             json!({"code":"unreferenced_candidate","blob_sha256":hash}),
@@ -810,17 +1282,20 @@ struct Cursor {
 
 #[cfg(test)]
 mod tests {
-    use super::LIST_RUN_SQL;
+    use super::LIST_RUN_SQL_V2;
     use rusqlite::{Connection, params};
 
     #[test]
     fn filtered_list_query_uses_run_sequence_index() {
         let connection = Connection::open_in_memory().unwrap();
         connection
-            .execute_batch(include_str!("../migrations/001.sql"))
+            .execute_batch("CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/002.sql"))
             .unwrap();
         let mut statement = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {LIST_RUN_SQL}"))
+            .prepare(&format!("EXPLAIN QUERY PLAN {LIST_RUN_SQL_V2}"))
             .unwrap();
         let plan = statement
             .query_map(params!["rare", i64::MAX, i64::MAX, 21], |row| {

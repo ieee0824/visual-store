@@ -11,16 +11,16 @@ Store selection precedence is `--store PATH`, `VSTORE_ROOT`, then `$CWD/.visual-
 Except for `--help` and `--version`, stdout contains one UTF-8 JSON object followed by a newline. Successful commands use:
 
 ```json
-{"schema_version":1,"ok":true,"data":{}}
+{"schema_version":2,"ok":true,"data":{}}
 ```
 
 Failures set a nonzero exit status and use:
 
 ```json
-{"schema_version":1,"ok":false,"error":{"code":"E_...","message":"...","retryable":false}}
+{"schema_version":2,"ok":false,"error":{"code":"E_...","message":"...","retryable":false}}
 ```
 
-`verify` includes its bounded report under `data` when integrity problems are found. The machine-readable contract is [cli.schema.json](cli.schema.json).
+`verify` includes its bounded report under `data` when integrity problems are found. The machine-readable contract is [cli.schema.json](cli.schema.json). The previous response contract remains archived as [cli.schema.v1.json](cli.schema.v1.json); clients must select the schema by the envelope's `schema_version`.
 
 ## Commands
 
@@ -32,9 +32,11 @@ Initializes the selected store and returns its store UUID, schema version, and w
 
 Required: `--file PATH`.
 
-Optional metadata: `--run`, `--label`, `--note`, repeatable `--tag`, and `--captured-at RFC3339`. Storage options are `--keep-source`, `--operation-id`, and `--compression-level 0..9`.
+Optional metadata: `--run`, `--stream`, `--label`, `--note`, repeatable `--tag`, and `--captured-at RFC3339`. Storage options are `--keep-source`, `--operation-id`, and `--compression-level 0..9`.
 
-Tags are sorted and deduplicated. Empty run, label, and note values are normalized to absent. Captured timestamps are stored in UTC. An operation fingerprint covers the source hash and normalized explicit registration options, including the compression level and `keep-source`. The input path, generated image ID, and registration time are excluded.
+`--stream` requires `--run`. When a run is provided without a stream, the stream is `default`; observations without a run have no stream or frame number. Stream names are 1 through 128 UTF-8 bytes, and an explicitly empty value is rejected. Each successful registration receives the next `frame_no`, starting at zero, independently for each `(run, stream)`. Allocation and insertion occur in the same immediate SQLite transaction, so concurrent writers cannot publish duplicate frame numbers.
+
+Tags are sorted and deduplicated. Empty run, label, and note values are normalized to absent. Captured timestamps are stored in UTC. A versioned operation fingerprint covers the source hash and normalized explicit registration options, including stream, compression level, and `keep-source`. Migrated version-1 fingerprints remain retryable with their original semantics. The input path, generated image ID, registration time, and allocated frame number are excluded.
 
 The input is opened once, bounded, copied into a store temporary file, and checked for identity and metadata changes before registration. The input is never modified or removed.
 
@@ -62,6 +64,12 @@ Runs SQLite integrity and foreign-key checks, validates the manifest/store ID, v
 
 The stdout report contains counts and at most 20 examples. `--report NEW_FILE` writes every issue to a newly created JSON file. Integrity errors produce exit status 5. Files not referenced by the database are reported as `unreferenced_candidate`; they are not deleted or treated as corruption on that fact alone.
 
+### migrate
+
+`migrate --to 2` is the only operation that upgrades a version-1 store. Merely opening an old store never changes it: read operations remain available, while `put` returns `E_SCHEMA_VERSION` until migration. Stop other writers and back up the whole store before migration.
+
+Migration first creates and validates an on-store SQLite backup, then records a durable journal before changing the database and manifest. If interrupted, normal commands return `E_MIGRATION_INCOMPLETE`. Use `migrate --to 2 --resume` to roll forward or `migrate --to 2 --restore` to restore version 1. These are crash-recoverable ordered updates across SQLite and JSON files, not a claim of cross-file atomicity. A successful cleanup removes the migration journal and backup.
+
 ## Global resource limits
 
 | Option | Default |
@@ -74,7 +82,7 @@ The stdout report contains counts and at most 20 examples. `--report NEW_FILE` w
 
 All values must be positive and finite. The memory bound is enforced with a conservative pre-allocation estimate covering input/candidate container copies, filtered scanlines, decoded samples, and headroom. Increasing limits is an explicit caller decision. The same increased bounds may be needed for a later `verify`.
 
-Metadata limits are run 128 bytes, label 256 bytes, note 2,048 bytes, and at most 16 nonempty tags of 64 bytes each. Operation IDs are 1 through 128 bytes. Escaped metadata is also capped to preserve the 8 KiB `info` response budget.
+Metadata limits are run and stream 128 bytes each, label 256 bytes, note 2,048 bytes, and at most 16 nonempty tags of 64 bytes each. Operation IDs are 1 through 128 bytes. Escaped metadata is also capped to preserve the 8 KiB `info` response budget.
 
 ## Exit statuses
 
@@ -83,7 +91,7 @@ Metadata limits are run 128 bytes, label 256 bytes, note 2,048 bytes, and at mos
 | 0 | success, including empty lists and candidate-only verification | — |
 | 2 | input or usage | `E_INVALID_ARGUMENT`, `E_INVALID_IMAGE`, `E_LIMIT_EXCEEDED`, `E_INVALID_CURSOR` |
 | 3 | missing or unsupported | `E_NOT_FOUND`, `E_STORE_NOT_INITIALIZED`, `E_UNSUPPORTED_IMAGE`, `E_UNSUPPORTED_METADATA`, `E_SOURCE_NOT_RETAINED` |
-| 4 | conflict or temporary failure | `E_CONFLICT`, `E_BUSY`, `E_OUTPUT_EXISTS`, `E_SOURCE_CHANGED` |
+| 4 | conflict or temporary failure | `E_CONFLICT`, `E_BUSY`, `E_OUTPUT_EXISTS`, `E_SOURCE_CHANGED`, `E_MIGRATION_INCOMPLETE` |
 | 5 | integrity or version | `E_INTEGRITY`, `E_SCHEMA_VERSION`, `E_STORE_MISMATCH` |
 | 6 | I/O or environment | `E_IO`, `E_PERMISSION`, `E_DISK_FULL` |
 

@@ -17,6 +17,7 @@
             { "$ref": "#/$defs/get" },
             { "$ref": "#/$defs/verify" },
             { "$ref": "#/$defs/pack" },
+            { "$ref": "#/$defs/prune" },
             { "$ref": "#/$defs/migrate" }
           ]
         }
@@ -30,7 +31,7 @@
         "schema_version": { "const": 2 },
         "ok": { "const": false },
         "error": { "$ref": "#/$defs/error" },
-        "data": { "oneOf": [{ "$ref": "#/$defs/verify" }, { "$ref": "#/$defs/pack" }] }
+        "data": { "oneOf": [{ "$ref": "#/$defs/verify" }, { "$ref": "#/$defs/pack" }, { "$ref": "#/$defs/prune" }] }
       },
       "required": ["schema_version", "ok", "error"],
       "additionalProperties": false
@@ -242,6 +243,36 @@
         "results": { "type": "array", "items": { "$ref": "#/$defs/packResult" }, "maxItems": 20 }
       },
       "required": ["run", "requested_stream", "codec", "segment_frames", "frozen_through_seq", "dry_run", "candidate_images", "groups_considered", "segments_packed", "images_packed", "segments_not_beneficial", "images_not_beneficial", "images_skipped", "segments_failed", "png_distinct_bytes", "temporal_candidate_bytes", "published_object_bytes", "result_count", "results"],
+      "additionalProperties": false
+    },
+    "pruneResult": {
+      "type": "object",
+      "properties": {
+        "blob_sha256": { "$ref": "#/$defs/hash" },
+        "byte_length": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["reclaimable", "pruned", "failed"] },
+        "reason": { "type": "string" }
+      },
+      "required": ["blob_sha256", "byte_length", "status", "reason"],
+      "additionalProperties": false
+    },
+    "prune": {
+      "type": "object",
+      "properties": {
+        "dry_run": { "type": "boolean" },
+        "active_representation_bytes": { "type": "integer", "minimum": 0 },
+        "source_retained_bytes": { "type": "integer", "minimum": 0 },
+        "retired_candidate_bytes": { "type": "integer", "minimum": 0 },
+        "reclaimable_bytes": { "type": "integer", "minimum": 0 },
+        "reclaimed_bytes": { "type": "integer", "minimum": 0 },
+        "physical_object_bytes_before": { "type": "integer", "minimum": 0 },
+        "physical_object_bytes_after": { "type": "integer", "minimum": 0 },
+        "candidate_objects": { "type": "integer", "minimum": 0 },
+        "pruned_objects": { "type": "integer", "minimum": 0 },
+        "result_count": { "type": "integer", "minimum": 0 },
+        "results": { "type": "array", "items": { "$ref": "#/$defs/pruneResult" }, "maxItems": 20 }
+      },
+      "required": ["dry_run", "active_representation_bytes", "source_retained_bytes", "retired_candidate_bytes", "reclaimable_bytes", "reclaimed_bytes", "physical_object_bytes_before", "physical_object_bytes_after", "candidate_objects", "pruned_objects", "result_count", "results"],
       "additionalProperties": false
     },
     "migrate": {

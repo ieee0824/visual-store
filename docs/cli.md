@@ -95,6 +95,26 @@ the report says `not_beneficial`. Published segments are immutable and begin wit
 keyframe; retired PNGs remain available. Re-running pack never renumbers frames or
 repacks finalized segments.
 
+### prune
+
+Choose exactly one of `prune --dry-run` or `prune --apply`. The optional
+`--max-prune-objects` bound defaults to 10,000. No other command prunes as a side
+effect.
+
+Candidates are verified retired PNG objects with no active PNG, retained source,
+segment, alpha, or reconstruction reference. Every active replacement segment is
+decoded and reconstructed before a candidate is eligible. Prune takes an exclusive
+store lock from the start instead of upgrading a reader lock, so put, pack, get,
+verify, migration, and another prune cannot overlap its verification/deletion window.
+
+Apply first commits `pending`, then removes and syncs the exact content-addressed PNG,
+then commits `deleted`. Re-running resumes either interruption state. It never guesses
+at unindexed files and never removes inputs, exports, backups, sources, active objects,
+or temporal objects. Capacity fields are distinct within each category:
+`active_representation_bytes`, `source_retained_bytes`, `retired_candidate_bytes`,
+`reclaimable_bytes`, `reclaimed_bytes`, and total scoped physical object bytes before
+and after. Shared blobs and segments are not multiplied per image.
+
 ### migrate
 
 `migrate --to 2` is the only operation that upgrades a version-1 store. Merely opening an old store never changes it: read operations remain available, while `put` returns `E_SCHEMA_VERSION` until migration. Stop other writers and back up the whole store before migration.

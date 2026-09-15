@@ -46,6 +46,9 @@ vstore --store "$PWD/.visual-store" list --run ui-check-20260915-a --limit 20
 vstore --store "$PWD/.visual-store" pack --run ui-check-20260915-a --dry-run
 vstore --store "$PWD/.visual-store" pack --run ui-check-20260915-a
 vstore --store "$PWD/.visual-store" get-frame --run ui-check-20260915-a --stream browser-main --frame 0
+vstore --store "$PWD/.visual-store" prune --dry-run
+# Explicitly apply only after reviewing the report on an isolated store.
+vstore --store "$PWD/.visual-store" prune --apply
 vstore --store "$PWD/.visual-store" info 'visual://STORE_ID/images/IMAGE_ID'
 vstore --store "$PWD/.visual-store" get 'visual://STORE_ID/images/IMAGE_ID'
 vstore --store "$PWD/.visual-store" verify

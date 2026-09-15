@@ -74,5 +74,10 @@ Checked on 2026-09-15 with Rust 1.95.0 and system libvpx 1.16.0 on macOS. The `V
 | V12/V13 codec routes | Passed | Default builds decode directly through libvpx with no command invocation. `--no-default-features` builds compile and report unavailable video operations explicitly while preserving non-video APIs. |
 | V18 temporal corruption | Passed | Video bytes, reconstruction bytes, and valid-but-wrong decode offsets make get/verify fail; explicit output paths remain absent. Each segment is decoded once per verify pass. |
 | V21 packed source retrieval | Passed | `get-frame --variant source` after pack is byte-identical to the retained input. |
+| V17 prune exclusion | Passed | Prune acquires the store's exclusive lock directly; a held get/verify-style shared handle blocks it, with no lock upgrade. |
+| V18 prune safety | Passed | A corrupt replacement segment makes apply fail before tombstoning and leaves every recoverable retired PNG present. Codec-free verification reports unavailable rather than deleting. |
+| V21 prune/source | Passed | Retained sources remain byte-identical after pack and applied prune. Inputs and exports are outside the deletion candidate query. |
+| V23 prune accounting | Passed | Two packed runs sharing eight retired PNG objects produce sixteen retired rows but eight candidate objects, counted and removed once. |
+| V25 prune recovery | Passed | Dry-run/apply physical byte deltas equal actual unlinks; restart retrieval and verify pass. Fault injection covers each tombstone, unlink, and finalize boundary with successful retry. |
 
 The precise binding, baseline libvpx version, encoder configuration, reversible RGB/RGBA plane layout, licenses, and reproducible setup are recorded in [ADR 0001](adr/0001-vp9-lossless-codec.md).

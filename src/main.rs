@@ -4,7 +4,11 @@ use std::{
     io::{self, Write},
     path::PathBuf,
 };
-use visual_store::{Error, PutOptions, Result, Store, image::Limits, store::PackOptions};
+use visual_store::{
+    Error, PutOptions, Result, Store,
+    image::Limits,
+    store::{PackOptions, PruneOptions},
+};
 
 #[derive(Parser)]
 #[command(
@@ -130,6 +134,14 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         max_encode_seconds: u64,
     },
+    Prune {
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+        #[arg(long, default_value_t = 10000)]
+        max_prune_objects: usize,
+    },
     Migrate {
         #[arg(long)]
         to: u32,
@@ -162,6 +174,29 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
     } = &cli.command
     {
         return Ok((Store::migrate(&cli.store, *to, *resume, *restore)?, 0));
+    }
+    if let Command::Prune {
+        dry_run,
+        apply,
+        max_prune_objects,
+    } = &cli.command
+    {
+        let outcome = Store::prune(
+            &cli.store,
+            PruneOptions {
+                dry_run: *dry_run,
+                apply: *apply,
+                max_objects: *max_prune_objects,
+            },
+            limits,
+        )?;
+        if let Some(error) = outcome.error {
+            return Ok((
+                json!({"prune":outcome.data,"operation_error":error}),
+                error.exit_code(),
+            ));
+        }
+        return Ok((outcome.data, 0));
     }
     let writable = matches!(cli.command, Command::Put { .. } | Command::Pack { .. });
     let mut store = Store::open(&cli.store, writable)?;
@@ -253,6 +288,7 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
             outcome.data
         }
         Command::Migrate { .. } => unreachable!(),
+        Command::Prune { .. } => unreachable!(),
     };
     Ok((data, 0))
 }
@@ -285,14 +321,22 @@ fn main() {
     match run(cli) {
         Ok((data, 0)) => emit(json!({"schema_version":2,"ok":true,"data":data}), 0),
         Ok((data, code)) => {
-            let error = data.get("pack_error").cloned().unwrap_or_else(|| {
-                serde_json::to_value(Error::new(
-                    "E_INTEGRITY",
-                    "Store verification found integrity problems.",
-                ))
-                .unwrap()
-            });
-            let data = data.get("pack").cloned().unwrap_or(data);
+            let error = data
+                .get("pack_error")
+                .or_else(|| data.get("operation_error"))
+                .cloned()
+                .unwrap_or_else(|| {
+                    serde_json::to_value(Error::new(
+                        "E_INTEGRITY",
+                        "Store verification found integrity problems.",
+                    ))
+                    .unwrap()
+                });
+            let data = data
+                .get("pack")
+                .or_else(|| data.get("prune"))
+                .cloned()
+                .unwrap_or(data);
             emit(
                 json!({"schema_version":2,"ok":false,"data":data,"error":error}),
                 code,

@@ -57,6 +57,13 @@ Builds without the optional default `vp9` feature can still read metadata, activ
 PNGs, and retained sources; video retrieval reports `E_CODEC_UNAVAILABLE` and verify
 marks video segments explicitly unverified.
 
+Pruning is the only operation that removes retired representation files. It holds an
+exclusive store-directory lock for the whole operation and uses the persisted
+`retained → pending → deleted` state machine described in
+[ADR 0004](adr/0004-prune-protocol.md). A `deleted` retired row and its blob metadata
+remain as a tombstone, while the PNG object itself is expected to be absent. Capacity
+queries use distinct blob hashes so shared objects are counted once per category.
+
 ## Blob publication order
 
 1. Read and freeze the source under configured bounds; detect source changes.

@@ -82,6 +82,7 @@ fn stdout_obeys_json_schema_and_size_budgets() {
         4096,
     );
     check(&["pack", "--run", "schema", "--dry-run"], 8192);
+    check(&["prune", "--dry-run"], 16384);
     check(
         &[
             "put",

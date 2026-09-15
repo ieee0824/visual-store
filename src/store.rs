@@ -18,8 +18,10 @@ use std::{fs, io::Write, path::Path, time::Duration};
 use uuid::Uuid;
 
 mod pack;
+mod prune;
 mod retrieval;
 pub use pack::{PackOptions, PackOutcome};
+pub use prune::{PruneOptions, PruneOutcome};
 
 const ENCODING: &str = "png-idat-zlib-v1";
 const CURRENT_FORMAT_VERSION: u32 = 2;
@@ -1238,6 +1240,15 @@ impl Store {
             let length: u64 = row.get(2)?;
             let media: String = row.get(3)?;
             let kind: String = row.get(4)?;
+            if self.format_version == 2 && kind == "png" {
+                let expected_present: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM representations WHERE representation_kind='png' AND png_blob_sha256=?1 UNION SELECT 1 FROM images WHERE source_blob_sha256=?1 UNION SELECT 1 FROM retired_representations WHERE representation_kind='png' AND png_blob_sha256=?1 AND prune_state!='deleted')",
+                    [&hash], |row| row.get(0),
+                )?;
+                if !expected_present {
+                    continue;
+                }
+            }
             let check = (|| -> Result<()> {
                 let (extension, expected_media) = match kind.as_str() {
                     "png" => ("png", "image/png"),

@@ -32,6 +32,7 @@ impl Error {
             | "E_SOURCE_CHANGED"
             | "E_MIGRATION_INCOMPLETE" => 4,
             "E_INTEGRITY" | "E_SCHEMA_VERSION" | "E_STORE_MISMATCH" => 5,
+            "E_CODEC_FAILURE" => 6,
             _ => 6,
         }
     }

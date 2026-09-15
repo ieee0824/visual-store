@@ -43,6 +43,8 @@ vstore --store "$PWD/.visual-store" put \
   --note "後で確認するため保存。画像はまだ見ていない。"
 
 vstore --store "$PWD/.visual-store" list --run ui-check-20260915-a --limit 20
+vstore --store "$PWD/.visual-store" pack --run ui-check-20260915-a --dry-run
+vstore --store "$PWD/.visual-store" pack --run ui-check-20260915-a
 vstore --store "$PWD/.visual-store" info 'visual://STORE_ID/images/IMAGE_ID'
 vstore --store "$PWD/.visual-store" get 'visual://STORE_ID/images/IMAGE_ID'
 vstore --store "$PWD/.visual-store" verify

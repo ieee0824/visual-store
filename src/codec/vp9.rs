@@ -13,6 +13,7 @@ use std::{
     fmt,
     os::raw::{c_int, c_ulong},
     ptr,
+    time::{Duration, Instant},
 };
 use vpx_sys as ffi;
 
@@ -197,6 +198,18 @@ impl CodecError {
             operation: "descriptor validation",
             message: message.into(),
         }
+    }
+
+    fn limit() -> Self {
+        Self {
+            operation: "resource limit",
+            message: "VP9 encoding deadline exceeded".into(),
+        }
+    }
+
+    /// Whether this failure is the explicit encoding deadline rather than a codec failure.
+    pub fn is_limit_exceeded(&self) -> bool {
+        self.operation == "resource limit"
     }
 
     fn vpx(
@@ -581,10 +594,14 @@ fn encode_stream(
     height: u32,
     pixels: usize,
     alpha: bool,
+    deadline: Option<Instant>,
 ) -> Result<Vec<Packet>> {
     let mut encoder = Encoder::new(width, height)?;
     let mut packets = Vec::new();
     for (index, frame) in frames.iter().copied().enumerate() {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(CodecError::limit());
+        }
         let mut planes = if alpha {
             alpha_planes(frame, pixels)
         } else {
@@ -592,16 +609,33 @@ fn encode_stream(
         };
         packets.extend(encoder.encode(&mut planes, width, height, index as i64)?);
     }
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(CodecError::limit());
+    }
     packets.extend(encoder.finish()?);
     Ok(packets)
 }
 
 /// Encode two or more frames with one lossless VP9 encoder per stored stream.
 pub fn encode(frames: &[Frame<'_>]) -> Result<EncodedSequence> {
+    encode_internal(frames, None)
+}
+
+/// Encode with a finite wall-clock deadline checked between libvpx calls.
+pub fn encode_with_time_limit(frames: &[Frame<'_>], limit: Duration) -> Result<EncodedSequence> {
+    let deadline = Instant::now()
+        .checked_add(limit)
+        .ok_or_else(CodecError::limit)?;
+    encode_internal(frames, Some(deadline))
+}
+
+fn encode_internal(frames: &[Frame<'_>], deadline: Option<Instant>) -> Result<EncodedSequence> {
     let (width, height, layout, pixels) = validate_frames(frames)?;
-    let color_packets = encode_stream(frames, width, height, pixels, false)?;
+    let color_packets = encode_stream(frames, width, height, pixels, false, deadline)?;
     let alpha_packets = if layout == PixelLayout::Rgba8 {
-        Some(encode_stream(frames, width, height, pixels, true)?)
+        Some(encode_stream(
+            frames, width, height, pixels, true, deadline,
+        )?)
     } else {
         None
     };

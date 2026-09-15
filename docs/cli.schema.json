@@ -16,6 +16,7 @@
             { "$ref": "#/$defs/list" },
             { "$ref": "#/$defs/get" },
             { "$ref": "#/$defs/verify" },
+            { "$ref": "#/$defs/pack" },
             { "$ref": "#/$defs/migrate" }
           ]
         }
@@ -29,7 +30,7 @@
         "schema_version": { "const": 2 },
         "ok": { "const": false },
         "error": { "$ref": "#/$defs/error" },
-        "data": { "$ref": "#/$defs/verify" }
+        "data": { "oneOf": [{ "$ref": "#/$defs/verify" }, { "$ref": "#/$defs/pack" }] }
       },
       "required": ["schema_version", "ok", "error"],
       "additionalProperties": false
@@ -182,6 +183,50 @@
         "valid": { "type": "boolean" }
       },
       "required": ["store_id", "images_checked", "blobs_checked", "error_count", "unreferenced_candidates", "issue_count", "issues", "valid"],
+      "additionalProperties": false
+    },
+    "packResult": {
+      "type": "object",
+      "properties": {
+        "stream": { "type": "string" },
+        "first_frame_no": { "type": "integer", "minimum": 0 },
+        "last_frame_no": { "type": "integer", "minimum": 0 },
+        "image_count": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["packed", "would_pack", "not_beneficial", "skipped", "failed", "no_op"] },
+        "reason": { "type": "string" },
+        "segment_id": { "$ref": "#/$defs/hash" },
+        "png_distinct_bytes": { "type": "integer", "minimum": 0 },
+        "candidate_bytes": { "type": "integer", "minimum": 0 },
+        "reconstruction_distinct_bytes": { "type": "integer", "minimum": 0 },
+        "encode_millis": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["status", "reason"],
+      "additionalProperties": false
+    },
+    "pack": {
+      "type": "object",
+      "properties": {
+        "run": { "type": "string" },
+        "requested_stream": { "$ref": "#/$defs/nullableString" },
+        "codec": { "const": "vp9" },
+        "segment_frames": { "type": "integer", "minimum": 2, "maximum": 128 },
+        "frozen_through_seq": { "type": "integer", "minimum": 0 },
+        "dry_run": { "type": "boolean" },
+        "candidate_images": { "type": "integer", "minimum": 0 },
+        "groups_considered": { "type": "integer", "minimum": 0 },
+        "segments_packed": { "type": "integer", "minimum": 0 },
+        "images_packed": { "type": "integer", "minimum": 0 },
+        "segments_not_beneficial": { "type": "integer", "minimum": 0 },
+        "images_not_beneficial": { "type": "integer", "minimum": 0 },
+        "images_skipped": { "type": "integer", "minimum": 0 },
+        "segments_failed": { "type": "integer", "minimum": 0 },
+        "png_distinct_bytes": { "type": "integer", "minimum": 0 },
+        "temporal_candidate_bytes": { "type": "integer", "minimum": 0 },
+        "published_object_bytes": { "type": "integer", "minimum": 0 },
+        "result_count": { "type": "integer", "minimum": 0 },
+        "results": { "type": "array", "items": { "$ref": "#/$defs/packResult" }, "maxItems": 20 }
+      },
+      "required": ["run", "requested_stream", "codec", "segment_frames", "frozen_through_seq", "dry_run", "candidate_images", "groups_considered", "segments_packed", "images_packed", "segments_not_beneficial", "images_not_beneficial", "images_skipped", "segments_failed", "png_distinct_bytes", "temporal_candidate_bytes", "published_object_bytes", "result_count", "results"],
       "additionalProperties": false
     },
     "migrate": {

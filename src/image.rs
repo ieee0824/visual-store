@@ -1,5 +1,7 @@
 //! PNG container repacking; png handles sample decoding, flate2 handles zlib,
 //! and crc32fast handles CRC. No pixel transforms or filter selection happen here.
+pub mod reconstruction;
+
 use crate::{Error, Result, sha256};
 use flate2::{Compression, Decompress, FlushDecompress, Status, write::ZlibEncoder};
 use serde::{Deserialize, Serialize};

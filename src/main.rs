@@ -92,6 +92,18 @@ enum Command {
         #[arg(long,value_enum,default_value_t=Variant::Stored)]
         variant: Variant,
     },
+    GetFrame {
+        #[arg(long)]
+        run: String,
+        #[arg(long, default_value = "default")]
+        stream: String,
+        #[arg(long)]
+        frame: u64,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long,value_enum,default_value_t=Variant::Stored)]
+        variant: Variant,
+    },
     Verify {
         #[arg(long)]
         report: Option<PathBuf>,
@@ -193,6 +205,16 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
             matches!(variant, Variant::Source),
             output.as_deref(),
         )?,
+        Command::GetFrame {
+            run,
+            stream,
+            frame,
+            output,
+            variant,
+        } => {
+            let id = store.resolve_frame(&run, &stream, frame)?;
+            store.materialize(&id, matches!(variant, Variant::Source), output.as_deref())?
+        }
         Command::Verify { report } => {
             let d = store.verify(report.as_deref())?;
             let code = if d["valid"] == false { 5 } else { 0 };

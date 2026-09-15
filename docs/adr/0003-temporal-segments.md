@@ -32,3 +32,10 @@ image identity or frame numbering and ignores finalized segments.
 The format is narrow and independently decodable, with no runtime media-tool
 dependency. Unknown versions fail explicitly. Source/image memory, candidate count,
 packet count, object bytes, reconstruction bytes, and encode time are bounded.
+
+Random access uses the indexed frame location to select one segment and feeds only
+the packet prefix needed to produce the requested display frame. Reconstructed output
+is published only after the stable observation hashes pass. Full verification decodes
+each shared segment once. The native codec is a default Cargo feature; codec-free
+builds keep metadata, PNG, and retained-source operations while explicitly refusing
+video encode/decode.

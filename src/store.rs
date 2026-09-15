@@ -18,6 +18,7 @@ use std::{fs, io::Write, path::Path, time::Duration};
 use uuid::Uuid;
 
 mod pack;
+mod retrieval;
 pub use pack::{PackOptions, PackOutcome};
 
 const ENCODING: &str = "png-idat-zlib-v1";
@@ -35,8 +36,9 @@ const MIGRATION_BACKUP_FILES: [&str; 4] = [
 const LIST_DATA_BUDGET_BYTES: usize = 16 * 1024 - 64;
 const LIST_ALL_SQL_V1: &str = "SELECT image_id,seq,run,NULL,NULL,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE seq<=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3";
 const LIST_RUN_SQL_V1: &str = "SELECT image_id,seq,run,NULL,NULL,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE run=?1 AND seq<=?2 AND seq<?3 ORDER BY seq DESC LIMIT ?4";
-const LIST_ALL_SQL_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.label,i.width,i.height,i.created_at,b.byte_length FROM images i JOIN representations r ON r.image_id=i.image_id LEFT JOIN retired_representations rr ON rr.retired_id=(SELECT retired_id FROM retired_representations WHERE image_id=i.image_id AND representation_kind='png' AND prune_state!='deleted' ORDER BY representation_version DESC LIMIT 1) JOIN blobs b ON b.sha256=CASE WHEN r.representation_kind='png' THEN r.png_blob_sha256 ELSE rr.png_blob_sha256 END WHERE i.seq<=?1 AND i.seq<?2 ORDER BY i.seq DESC LIMIT ?3";
-const LIST_RUN_SQL_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.label,i.width,i.height,i.created_at,b.byte_length FROM images i JOIN representations r ON r.image_id=i.image_id LEFT JOIN retired_representations rr ON rr.retired_id=(SELECT retired_id FROM retired_representations WHERE image_id=i.image_id AND representation_kind='png' AND prune_state!='deleted' ORDER BY representation_version DESC LIMIT 1) JOIN blobs b ON b.sha256=CASE WHEN r.representation_kind='png' THEN r.png_blob_sha256 ELSE rr.png_blob_sha256 END WHERE i.run=?1 AND i.seq<=?2 AND i.seq<?3 ORDER BY i.seq DESC LIMIT ?4";
+const LIST_ALL_SQL_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.label,i.width,i.height,i.created_at,CASE WHEN r.representation_kind='png' THEN pb.byte_length ELSE cb.byte_length+COALESCE(ab.byte_length,0)+pr.descriptor_byte_length END FROM images i JOIN representations r ON r.image_id=i.image_id LEFT JOIN blobs pb ON pb.sha256=r.png_blob_sha256 LEFT JOIN segments s ON s.segment_id=r.segment_id LEFT JOIN blobs cb ON cb.sha256=s.color_blob_sha256 LEFT JOIN blobs ab ON ab.sha256=s.alpha_blob_sha256 LEFT JOIN png_reconstruction pr ON pr.image_id=i.image_id WHERE i.seq<=?1 AND i.seq<?2 ORDER BY i.seq DESC LIMIT ?3";
+const LIST_RUN_SQL_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.label,i.width,i.height,i.created_at,CASE WHEN r.representation_kind='png' THEN pb.byte_length ELSE cb.byte_length+COALESCE(ab.byte_length,0)+pr.descriptor_byte_length END FROM images i JOIN representations r ON r.image_id=i.image_id LEFT JOIN blobs pb ON pb.sha256=r.png_blob_sha256 LEFT JOIN segments s ON s.segment_id=r.segment_id LEFT JOIN blobs cb ON cb.sha256=s.color_blob_sha256 LEFT JOIN blobs ab ON ab.sha256=s.alpha_blob_sha256 LEFT JOIN png_reconstruction pr ON pr.image_id=i.image_id WHERE i.run=?1 AND i.seq<=?2 AND i.seq<?3 ORDER BY i.seq DESC LIMIT ?4";
+const GET_FRAME_SQL: &str = "SELECT image_id FROM images INDEXED BY images_by_stream_frame WHERE run=?1 AND stream=?2 AND frame_no=?3";
 type PriorOperation = (String, String, u32, Option<String>, Option<String>);
 fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
@@ -227,20 +229,27 @@ pub struct ImageRecord {
     pub color_type: u8,
     pub source_sha256: String,
     pub source_bytes: u64,
-    pub stored_sha256: String,
-    pub stored_bytes: u64,
+    pub stored_sha256: Option<String>,
+    pub stored_bytes: Option<u64>,
     pub source_retained: bool,
     pub scanline_sha256: String,
     pub non_idat_sha256: String,
     pub pixel_sha256: String,
     pub encoding_version: String,
-    pub compression_level: u32,
-    pub compression_applied: bool,
+    pub compression_level: Option<u32>,
+    pub compression_applied: Option<bool>,
+    pub representation_kind: String,
+    pub representation_version: u32,
+    pub segment_id: Option<String>,
+    pub frame_index: Option<u32>,
+    pub decode_start_index: Option<u32>,
+    pub shared_representation_bytes: u64,
+    pub shared_image_count: u32,
     #[serde(skip)]
     source_blob: Option<String>,
 }
-const SELECT_IMAGE_V1: &str = "SELECT i.image_id,i.seq,i.run,NULL,NULL,i.created_at,i.captured_at,i.label,i.note,i.tags_json,i.width,i.height,i.bit_depth,i.color_type,i.source_sha256,i.source_byte_length,i.stored_blob_sha256,b.byte_length,i.source_blob_sha256,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,i.encoding_version,i.compression_level,i.compression_applied,'png' FROM images i JOIN blobs b ON b.sha256=i.stored_blob_sha256";
-const SELECT_IMAGE_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.created_at,i.captured_at,i.label,i.note,i.tags_json,i.width,i.height,i.bit_depth,i.color_type,i.source_sha256,i.source_byte_length,CASE WHEN r.representation_kind='png' THEN r.png_blob_sha256 ELSE rr.png_blob_sha256 END,b.byte_length,i.source_blob_sha256,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,CASE WHEN r.representation_kind='png' THEN r.encoding_version ELSE rr.encoding_version END,CASE WHEN r.representation_kind='png' THEN r.compression_level ELSE NULL END,CASE WHEN r.representation_kind='png' THEN r.compression_applied ELSE NULL END,r.representation_kind FROM images i JOIN representations r ON r.image_id=i.image_id LEFT JOIN retired_representations rr ON rr.retired_id=(SELECT retired_id FROM retired_representations WHERE image_id=i.image_id AND representation_kind='png' AND prune_state!='deleted' ORDER BY representation_version DESC LIMIT 1) JOIN blobs b ON b.sha256=CASE WHEN r.representation_kind='png' THEN r.png_blob_sha256 ELSE rr.png_blob_sha256 END";
+const SELECT_IMAGE_V1: &str = "SELECT i.image_id,i.seq,i.run,NULL,NULL,i.created_at,i.captured_at,i.label,i.note,i.tags_json,i.width,i.height,i.bit_depth,i.color_type,i.source_sha256,i.source_byte_length,i.stored_blob_sha256,b.byte_length,i.source_blob_sha256,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,i.encoding_version,i.compression_level,i.compression_applied,'png',1,NULL,NULL,NULL,b.byte_length,1 FROM images i JOIN blobs b ON b.sha256=i.stored_blob_sha256";
+const SELECT_IMAGE_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.created_at,i.captured_at,i.label,i.note,i.tags_json,i.width,i.height,i.bit_depth,i.color_type,i.source_sha256,i.source_byte_length,r.png_blob_sha256,pb.byte_length,i.source_blob_sha256,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,r.encoding_version,r.compression_level,r.compression_applied,r.representation_kind,r.representation_version,r.segment_id,fl.frame_index,fl.decode_start_index,CASE WHEN r.representation_kind='png' THEN pb.byte_length ELSE cb.byte_length+COALESCE(ab.byte_length,0)+pr.descriptor_byte_length END,CASE WHEN r.representation_kind='png' THEN 1 ELSE s.frame_count END FROM images i JOIN representations r ON r.image_id=i.image_id LEFT JOIN blobs pb ON pb.sha256=r.png_blob_sha256 LEFT JOIN frame_locations fl ON fl.image_id=i.image_id AND fl.segment_id=r.segment_id LEFT JOIN segments s ON s.segment_id=r.segment_id LEFT JOIN blobs cb ON cb.sha256=s.color_blob_sha256 LEFT JOIN blobs ab ON ab.sha256=s.alpha_blob_sha256 LEFT JOIN png_reconstruction pr ON pr.image_id=i.image_id";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -255,33 +264,6 @@ fn row_image(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
     let tags: String = r.get(9)?;
     let source_blob: Option<String> = r.get(18)?;
     let active_kind: String = r.get(25)?;
-    let encoding: String = r.get(22)?;
-    let (encoding_version, compression_level, compression_applied) = if active_kind == "png" {
-        (encoding, r.get(23)?, r.get(24)?)
-    } else {
-        let retired: RetiredPngEncoding = serde_json::from_str(&encoding).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                22,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?;
-        if retired.version != 1 {
-            return Err(rusqlite::Error::FromSqlConversionFailure(
-                22,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "unsupported retired PNG metadata",
-                )),
-            ));
-        }
-        (
-            retired.encoding_version,
-            retired.compression_level,
-            retired.compression_applied,
-        )
-    };
     Ok(ImageRecord {
         image_id: r.get(0)?,
         seq: r.get(1)?,
@@ -308,9 +290,16 @@ fn row_image(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
         scanline_sha256: r.get(19)?,
         non_idat_sha256: r.get(20)?,
         pixel_sha256: r.get(21)?,
-        encoding_version,
-        compression_level,
-        compression_applied,
+        encoding_version: r.get(22)?,
+        compression_level: r.get(23)?,
+        compression_applied: r.get(24)?,
+        representation_kind: active_kind,
+        representation_version: r.get(26)?,
+        segment_id: r.get(27)?,
+        frame_index: r.get(28)?,
+        decode_start_index: r.get(29)?,
+        shared_representation_bytes: r.get(30)?,
+        shared_image_count: r.get(31)?,
     })
 }
 
@@ -824,6 +813,8 @@ impl Store {
         let r = self.record(&self.resolve(reference)?)?;
         let mut v = serde_json::to_value(&r)?;
         v["ref"] = self.reference(&r.image_id).into();
+        v["capacity_semantics"] =
+            "shared_representation_bytes_may_be_shared_by_multiple_images".into();
         Ok(v)
     }
     fn blob_dir(&self, hash: &str, create: bool) -> Result<Dir> {
@@ -908,8 +899,8 @@ impl Store {
         let r = self.record(id)?;
         Ok(
             json!({"ref":self.reference(&r.image_id),"image_id":r.image_id,"run":r.run,"stream":r.stream,"frame_no":r.frame_no,"seq":r.seq,
-            "width":r.width,"height":r.height,"source_bytes":r.source_bytes,"stored_bytes":r.stored_bytes,
-            "source_retained":r.source_retained,"blob_reused":blob_reused,"record_reused":record_reused,"compression_applied":r.compression_applied}),
+            "width":r.width,"height":r.height,"source_bytes":r.source_bytes,"stored_bytes":r.stored_bytes.unwrap_or(0),
+            "source_retained":r.source_retained,"blob_reused":blob_reused,"record_reused":record_reused,"compression_applied":r.compression_applied.unwrap_or(false)}),
         )
     }
     pub fn put(&mut self, source: &Path, mut opts: PutOptions) -> Result<Value> {
@@ -1137,15 +1128,21 @@ impl Store {
         output: Option<&Path>,
     ) -> Result<Value> {
         let r = self.record(&self.resolve(reference)?)?;
-        let (hash, length) = if source {
-            (
-                r.source_blob.as_ref().ok_or_else(|| {
-                    Error::new("E_SOURCE_NOT_RETAINED", "Original bytes were not retained.")
-                })?,
-                r.source_bytes,
-            )
+        let materialized = if source {
+            let hash = r.source_blob.as_ref().ok_or_else(|| {
+                Error::new("E_SOURCE_NOT_RETAINED", "Original bytes were not retained.")
+            })?;
+            retrieval::MaterializedBytes {
+                bytes: self.blob_bytes(hash, r.source_bytes)?,
+                sha256: hash.clone(),
+                backend: "source_png",
+                segment_id: None,
+                frame_index: None,
+                decoded_from_frame: None,
+                decoded_through_frame: None,
+            }
         } else {
-            (&r.stored_sha256, r.stored_bytes)
+            self.stored_bytes(&r)?
         };
         let (dir, name) = if let Some(out) = output {
             filesystem::external_destination(out)?
@@ -1162,14 +1159,14 @@ impl Store {
             return Err(invalid("Output path is too long for the JSON contract."));
         }
         filesystem::ensure_absent(&dir, &name)?;
-        let bytes = self.blob_bytes(hash, length)?;
         let mut tmp = Temp::new(&dir)?;
-        tmp.file.write_all(&bytes)?;
+        tmp.file.write_all(&materialized.bytes)?;
         if !tmp.publish(&dir, &name)? {
             return Err(Error::new("E_OUTPUT_EXISTS", "Output already exists."));
         }
+        let length = materialized.bytes.len() as u64;
         Ok(
-            json!({"ref":self.reference(&r.image_id),"path":path,"media_type":"image/png","width":r.width,"height":r.height,"byte_length":length,"sha256":hash,"variant":if source {"source"} else {"stored"},"displayed":false}),
+            json!({"ref":self.reference(&r.image_id),"path":path,"media_type":"image/png","width":r.width,"height":r.height,"byte_length":length,"sha256":materialized.sha256,"variant":if source {"source"} else {"stored"},"backend":materialized.backend,"segment_id":materialized.segment_id,"frame_index":materialized.frame_index,"decoded_from_frame":materialized.decoded_from_frame,"decoded_through_frame":materialized.decoded_through_frame,"displayed":false}),
         )
     }
 
@@ -1273,17 +1270,13 @@ impl Store {
                 }
                 let meta = image::validate(&bytes, &self.limits)?;
                 let image_query = if self.format_version == 1 {
-                    format!(
-                        "{SELECT_IMAGE_V1} WHERE i.stored_blob_sha256=?1 OR i.source_blob_sha256=?1"
-                    )
+                    "SELECT image_id FROM images WHERE stored_blob_sha256=?1 OR source_blob_sha256=?1"
                 } else {
-                    format!(
-                        "{SELECT_IMAGE_V2} WHERE r.png_blob_sha256=?1 OR rr.png_blob_sha256=?1 OR i.source_blob_sha256=?1"
-                    )
+                    "SELECT DISTINCT i.image_id FROM images i LEFT JOIN representations r ON r.image_id=i.image_id LEFT JOIN retired_representations rr ON rr.image_id=i.image_id AND rr.prune_state!='deleted' WHERE r.png_blob_sha256=?1 OR rr.png_blob_sha256=?1 OR i.source_blob_sha256=?1"
                 };
-                let mut images = tx.prepare(&image_query)?;
-                for r in images.query_map([&hash], row_image)? {
-                    let r = r?;
+                let mut images = tx.prepare(image_query)?;
+                for id in images.query_map([&hash], |row| row.get::<_, String>(0))? {
+                    let r = self.record(&id?)?;
                     if (r.width, r.height, r.bit_depth, r.color_type)
                         != (meta.width, meta.height, meta.bit_depth, meta.color_type)
                         || r.scanline_sha256 != meta.scanline_sha256
@@ -1302,6 +1295,22 @@ impl Store {
             })();
             if let Err(e) = check {
                 record_issue(json!({"code":e.code,"blob_sha256":hash}), true)?;
+            }
+        }
+        let mut segments_checked = 0u64;
+        if self.format_version == 2 {
+            let segment_ids = {
+                let mut statement =
+                    tx.prepare("SELECT segment_id FROM segments ORDER BY segment_id")?;
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            for segment_id in segment_ids {
+                segments_checked += 1;
+                if let Err(error) = self.verify_temporal_segment(&segment_id) {
+                    record_issue(json!({"code":error.code,"segment_id":segment_id}), true)?;
+                }
             }
         }
         // Fixed-depth enumeration; never follow symlinks or scan outside objects.
@@ -1356,7 +1365,7 @@ impl Store {
             }
         }
         let image_count: u64 = tx.query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0))?;
-        let summary = json!({"store_id":self.id,"images_checked":image_count,"blobs_checked":blob_count,"error_count":errors,"unreferenced_candidates":candidates,"issue_count":issue_count,"issues":examples,"valid":errors==0});
+        let summary = json!({"store_id":self.id,"images_checked":image_count,"blobs_checked":blob_count,"segments_checked":segments_checked,"error_count":errors,"unreferenced_candidates":candidates,"issue_count":issue_count,"issues":examples,"valid":errors==0});
         if let Some(f) = &mut report_file {
             f.file.write_all(b"],\"summary\":")?;
             f.file.write_all(&serde_json::to_vec(&summary)?)?;
@@ -1389,7 +1398,7 @@ struct Cursor {
 
 #[cfg(test)]
 mod tests {
-    use super::LIST_RUN_SQL_V2;
+    use super::{GET_FRAME_SQL, LIST_RUN_SQL_V2};
     use rusqlite::{Connection, params};
 
     #[test]
@@ -1416,5 +1425,24 @@ mod tests {
                 .any(|detail| detail.contains("images_by_run_seq") && detail.contains("run=?")),
             "query plan did not use the run/sequence index: {plan:?}"
         );
+    }
+
+    #[test]
+    fn frame_lookup_uses_stream_frame_index() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/002.sql"))
+            .unwrap();
+        let plan: String = connection
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {GET_FRAME_SQL}"),
+                params!["run", "stream", 7],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("images_by_stream_frame"), "{plan}");
     }
 }

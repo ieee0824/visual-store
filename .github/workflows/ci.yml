@@ -43,6 +43,12 @@ jobs:
       - name: Lint
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+      - name: Check codec-free metadata build
+        run: |
+          cargo check --locked --no-default-features
+          cargo test --locked --no-default-features --lib
+          cargo clippy --locked --no-default-features --lib -- -D warnings
+
       - name: Build no-command codec probe
         run: cargo build --locked --example vp9_roundtrip
 

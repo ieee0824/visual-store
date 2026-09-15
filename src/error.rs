@@ -25,6 +25,7 @@ impl Error {
             | "E_STORE_NOT_INITIALIZED"
             | "E_UNSUPPORTED_IMAGE"
             | "E_UNSUPPORTED_METADATA"
+            | "E_CODEC_UNAVAILABLE"
             | "E_SOURCE_NOT_RETAINED" => 3,
             "E_CONFLICT"
             | "E_BUSY"

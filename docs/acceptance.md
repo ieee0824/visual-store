@@ -69,5 +69,10 @@ Checked on 2026-09-15 with Rust 1.95.0 and system libvpx 1.16.0 on macOS. The `V
 | V15/V16 failure and limits | Passed | Fault points surround publication/commit; packet, byte, metadata, image-count, memory, and wall-clock limits fail explicitly. |
 | V17 concurrency | Passed | A frozen sequence and active-representation compare-and-swap exclude concurrent additions and representation changes. |
 | V23 accounting | Passed | Accounting includes distinct color, alpha, reconstruction and descriptor bytes; identical inputs retain PNG when temporal bytes are not smaller. |
+| V10 random access | Passed | `get-frame` uses `images_by_stream_frame`, reports the selected segment/index and decoded prefix, and middle/final/missing-frame cases are covered in `tests/pack.rs`. |
+| V11 restart/copy | Passed | Packed retrieval and full temporal verification pass after closing and copying the complete store. |
+| V12/V13 codec routes | Passed | Default builds decode directly through libvpx with no command invocation. `--no-default-features` builds compile and report unavailable video operations explicitly while preserving non-video APIs. |
+| V18 temporal corruption | Passed | Video bytes, reconstruction bytes, and valid-but-wrong decode offsets make get/verify fail; explicit output paths remain absent. Each segment is decoded once per verify pass. |
+| V21 packed source retrieval | Passed | `get-frame --variant source` after pack is byte-identical to the retained input. |
 
 The precise binding, baseline libvpx version, encoder configuration, reversible RGB/RGBA plane layout, licenses, and reproducible setup are recorded in [ADR 0001](adr/0001-vp9-lossless-codec.md).

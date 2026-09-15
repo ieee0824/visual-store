@@ -48,6 +48,15 @@ the old PNG representation, and activates the new representation. A crash before
 commit can leave only complete unreferenced candidates; a crash after commit leaves
 the entire segment active. Retired PNG objects are not deleted by pack.
 
+Retrieval resolves `frame_locations` by image identity (or the indexed
+`images_by_stream_frame` key), loads only the named segment, and decodes its prefix
+from `decode_start_index` through `frame_index`. Reconstruction must pass all stored
+observation hashes and the strict PNG validator before a temporary export is
+published. Verification decodes each segment once and validates all mapped frames.
+Builds without the optional default `vp9` feature can still read metadata, active
+PNGs, and retained sources; video retrieval reports `E_CODEC_UNAVAILABLE` and verify
+marks video segments explicitly unverified.
+
 ## Blob publication order
 
 1. Read and freeze the source under configured bounds; detect source changes.

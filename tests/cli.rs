@@ -82,6 +82,17 @@ fn stdout_obeys_json_schema_and_size_budgets() {
         4096,
     );
     check(&["pack", "--run", "schema", "--dry-run"], 8192);
+    check(
+        &[
+            "put",
+            "--file",
+            h.input.to_str().unwrap(),
+            "--run",
+            "framed",
+        ],
+        4096,
+    );
+    check(&["get-frame", "--run", "framed", "--frame", "0"], 4096);
     let r = p["data"]["ref"].as_str().unwrap();
     check(&["info", r], 8192);
     check(&["get", r], 4096);

@@ -211,7 +211,12 @@ fn checked_sum<I: IntoIterator<Item = u64>>(values: I, message: &str) -> Result<
 }
 
 fn codec_error(error: vp9::CodecError) -> Error {
-    if error.is_limit_exceeded() {
+    if error.is_unavailable() {
+        Error::new(
+            "E_CODEC_UNAVAILABLE",
+            "VP9 codec support is unavailable in this build.",
+        )
+    } else if error.is_limit_exceeded() {
         Error::new(
             "E_LIMIT_EXCEEDED",
             "VP9 encoding exceeded --max-encode-seconds.",

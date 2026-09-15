@@ -58,9 +58,23 @@ Accepts a reference, optional `--variant stored|source`, and optional `--output 
 
 The source blob is size- and SHA-256-checked before publication. Existing files and symlinks are never overwritten. The returned path is absolute and the JSON always reports `displayed: false`.
 
+For an active VP9 representation, stored retrieval reads exactly its indexed segment,
+decodes from `decode_start_index` through `frame_index`, reconstructs the PNG, and
+validates dimensions plus pixel, scanline, non-IDAT, and complete PNG hashes before
+no-clobber publication. The result records `backend`, `segment_id`, `frame_index`, and
+the decoded range. `info` reports these representation fields and shared byte/image
+counts without decoding.
+
+### get-frame
+
+`get-frame --run RUN [--stream default] --frame N` selects one observation through
+the `(run, stream, frame_no)` index and otherwise accepts the same `--variant` and
+`--output` options as `get`. A missing exact frame returns `E_NOT_FOUND`; adjacent
+content is never substituted and unrelated segments are not scanned.
+
 ### verify
 
-Runs SQLite integrity and foreign-key checks, validates the manifest/store ID, verifies every indexed blob's path, size, SHA-256, PNG decoding, dimensions, and stored verification hashes, and enumerates fixed-depth object paths without following symlinks.
+Runs SQLite integrity and foreign-key checks, validates the manifest/store ID, verifies every indexed typed object's path, size, and SHA-256, and enumerates fixed-depth object paths without following symlinks. Each shared segment is decoded once; color/alpha containers, mappings, reconstructed dimensions, pixels, scanlines, non-IDAT metadata, and final PNG validity are checked.
 
 The stdout report contains counts and at most 20 examples. `--report NEW_FILE` writes every issue to a newly created JSON file. Integrity errors produce exit status 5. Files not referenced by the database are reported as `unreferenced_candidate`; they are not deleted or treated as corruption on that fact alone.
 
@@ -107,7 +121,7 @@ Metadata limits are run and stream 128 bytes each, label 256 bytes, note 2,048 b
 | ---: | --- | --- |
 | 0 | success, including empty lists and candidate-only verification | — |
 | 2 | input or usage | `E_INVALID_ARGUMENT`, `E_INVALID_IMAGE`, `E_LIMIT_EXCEEDED`, `E_INVALID_CURSOR` |
-| 3 | missing or unsupported | `E_NOT_FOUND`, `E_STORE_NOT_INITIALIZED`, `E_UNSUPPORTED_IMAGE`, `E_UNSUPPORTED_METADATA`, `E_SOURCE_NOT_RETAINED` |
+| 3 | missing or unsupported | `E_NOT_FOUND`, `E_STORE_NOT_INITIALIZED`, `E_UNSUPPORTED_IMAGE`, `E_UNSUPPORTED_METADATA`, `E_SOURCE_NOT_RETAINED`, `E_CODEC_UNAVAILABLE` |
 | 4 | conflict or temporary failure | `E_CONFLICT`, `E_BUSY`, `E_OUTPUT_EXISTS`, `E_SOURCE_CHANGED`, `E_MIGRATION_INCOMPLETE` |
 | 5 | integrity or version | `E_INTEGRITY`, `E_SCHEMA_VERSION`, `E_STORE_MISMATCH` |
 | 6 | I/O, codec, or environment | `E_IO`, `E_PERMISSION`, `E_DISK_FULL`, `E_CODEC_FAILURE` |

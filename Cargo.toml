@@ -11,6 +11,8 @@ name = "vstore"
 path = "src/main.rs"
 
 [features]
+default = ["vp9"]
+vp9 = ["dep:libvpx-native-sys"]
 # Only for isolated failure-injection tests; never enable in installed builds.
 fault-injection = []
 
@@ -21,7 +23,7 @@ clap = { version = "4.6", features = ["derive", "env"] }
 crc32fast = "1.5"
 flate2 = "1.1"
 libc = "0.2"
-libvpx-native-sys = "=5.0.17"
+libvpx-native-sys = { version = "=5.0.17", optional = true }
 png = "0.18"
 rusqlite = { version = "0.32.1", features = ["backup", "bundled"] }
 serde = { version = "1.0", features = ["derive"] }

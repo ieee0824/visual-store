@@ -103,17 +103,25 @@
         "color_type": { "enum": [2, 6] },
         "source_sha256": { "$ref": "#/$defs/hash" },
         "source_bytes": { "type": "integer", "minimum": 1 },
-        "stored_sha256": { "$ref": "#/$defs/hash" },
-        "stored_bytes": { "type": "integer", "minimum": 1 },
+        "stored_sha256": { "oneOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "stored_bytes": { "type": ["integer", "null"], "minimum": 1 },
         "source_retained": { "type": "boolean" },
         "scanline_sha256": { "$ref": "#/$defs/hash" },
         "non_idat_sha256": { "$ref": "#/$defs/hash" },
         "pixel_sha256": { "$ref": "#/$defs/hash" },
         "encoding_version": { "type": "string" },
-        "compression_level": { "type": "integer", "minimum": 0, "maximum": 9 },
-        "compression_applied": { "type": "boolean" }
+        "compression_level": { "type": ["integer", "null"], "minimum": 0, "maximum": 9 },
+        "compression_applied": { "type": ["boolean", "null"] },
+        "representation_kind": { "enum": ["png", "vp9_segment"] },
+        "representation_version": { "type": "integer", "minimum": 1 },
+        "segment_id": { "oneOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "frame_index": { "type": ["integer", "null"], "minimum": 0 },
+        "decode_start_index": { "type": ["integer", "null"], "minimum": 0 },
+        "shared_representation_bytes": { "type": "integer", "minimum": 1 },
+        "shared_image_count": { "type": "integer", "minimum": 1 },
+        "capacity_semantics": { "const": "shared_representation_bytes_may_be_shared_by_multiple_images" }
       },
-      "required": ["ref", "image_id", "run", "stream", "frame_no", "seq", "created_at", "captured_at", "label", "note", "tags", "width", "height", "bit_depth", "color_type", "source_sha256", "source_bytes", "stored_sha256", "stored_bytes", "source_retained", "scanline_sha256", "non_idat_sha256", "pixel_sha256", "encoding_version", "compression_level", "compression_applied"],
+      "required": ["ref", "image_id", "run", "stream", "frame_no", "seq", "created_at", "captured_at", "label", "note", "tags", "width", "height", "bit_depth", "color_type", "source_sha256", "source_bytes", "stored_sha256", "stored_bytes", "source_retained", "scanline_sha256", "non_idat_sha256", "pixel_sha256", "encoding_version", "compression_level", "compression_applied", "representation_kind", "representation_version", "segment_id", "frame_index", "decode_start_index", "shared_representation_bytes", "shared_image_count", "capacity_semantics"],
       "additionalProperties": false
     },
     "listItem": {
@@ -153,9 +161,14 @@
         "byte_length": { "type": "integer", "minimum": 1 },
         "sha256": { "$ref": "#/$defs/hash" },
         "variant": { "enum": ["stored", "source"] },
+        "backend": { "enum": ["png", "source_png", "vp9_segment"] },
+        "segment_id": { "oneOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "frame_index": { "type": ["integer", "null"], "minimum": 0 },
+        "decoded_from_frame": { "type": ["integer", "null"], "minimum": 0 },
+        "decoded_through_frame": { "type": ["integer", "null"], "minimum": 0 },
         "displayed": { "const": false }
       },
-      "required": ["ref", "path", "media_type", "width", "height", "byte_length", "sha256", "variant", "displayed"],
+      "required": ["ref", "path", "media_type", "width", "height", "byte_length", "sha256", "variant", "backend", "segment_id", "frame_index", "decoded_from_frame", "decoded_through_frame", "displayed"],
       "additionalProperties": false
     },
     "verify": {
@@ -164,6 +177,7 @@
         "store_id": { "$ref": "#/$defs/uuid" },
         "images_checked": { "type": "integer", "minimum": 0 },
         "blobs_checked": { "type": "integer", "minimum": 0 },
+        "segments_checked": { "type": "integer", "minimum": 0 },
         "error_count": { "type": "integer", "minimum": 0 },
         "unreferenced_candidates": { "type": "integer", "minimum": 0 },
         "issue_count": { "type": "integer", "minimum": 0 },
@@ -174,6 +188,7 @@
             "properties": {
               "code": { "type": "string" },
               "blob_sha256": { "$ref": "#/$defs/hash" }
+              ,"segment_id": { "$ref": "#/$defs/hash" }
             },
             "required": ["code"],
             "additionalProperties": false
@@ -182,7 +197,7 @@
         },
         "valid": { "type": "boolean" }
       },
-      "required": ["store_id", "images_checked", "blobs_checked", "error_count", "unreferenced_candidates", "issue_count", "issues", "valid"],
+      "required": ["store_id", "images_checked", "blobs_checked", "segments_checked", "error_count", "unreferenced_candidates", "issue_count", "issues", "valid"],
       "additionalProperties": false
     },
     "packResult": {

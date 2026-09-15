@@ -212,6 +212,11 @@ impl CodecError {
         self.operation == "resource limit"
     }
 
+    /// Native codec support is present in this module.
+    pub fn is_unavailable(&self) -> bool {
+        false
+    }
+
     fn vpx(
         operation: &'static str,
         code: ffi::vpx_codec_err_t,
@@ -690,13 +695,23 @@ fn validate_descriptor(sequence: &EncodedSequence) -> Result<()> {
     }
 }
 
-fn decode_stream(packets: &[Packet], width: u32, height: u32) -> Result<Vec<PlanarFrame>> {
+fn decode_stream(
+    packets: &[Packet],
+    width: u32,
+    height: u32,
+    display_frames: usize,
+) -> Result<Vec<PlanarFrame>> {
     let mut decoder = Decoder::new(width, height)?;
     let mut frames = Vec::new();
     for packet in packets {
         frames.extend(decoder.decode(&packet.data)?);
+        if frames.len() >= display_frames {
+            frames.truncate(display_frames);
+            return Ok(frames);
+        }
     }
     frames.extend(decoder.finish()?);
+    frames.truncate(display_frames);
     if frames
         .iter()
         .any(|frame| frame.width != width || frame.height != height)
@@ -710,17 +725,33 @@ fn decode_stream(packets: &[Packet], width: u32, height: u32) -> Result<Vec<Plan
 
 /// Decode and reverse the internal plane mapping for every display frame.
 pub fn decode(sequence: &EncodedSequence) -> Result<Vec<DecodedFrame>> {
+    decode_prefix(sequence, sequence.frame_count)
+}
+
+/// Decode only the requested display-frame prefix of an independent sequence.
+pub fn decode_prefix(
+    sequence: &EncodedSequence,
+    display_frames: usize,
+) -> Result<Vec<DecodedFrame>> {
     validate_descriptor(sequence)?;
-    let colors = decode_stream(&sequence.color_packets, sequence.width, sequence.height)?;
+    if display_frames == 0 || display_frames > sequence.frame_count {
+        return Err(CodecError::input("display-frame prefix is out of bounds"));
+    }
+    let colors = decode_stream(
+        &sequence.color_packets,
+        sequence.width,
+        sequence.height,
+        display_frames,
+    )?;
     let alphas = sequence
         .alpha_packets
         .as_ref()
-        .map(|packets| decode_stream(packets, sequence.width, sequence.height))
+        .map(|packets| decode_stream(packets, sequence.width, sequence.height, display_frames))
         .transpose()?;
-    if colors.len() != sequence.frame_count
+    if colors.len() != display_frames
         || alphas
             .as_ref()
-            .is_some_and(|frames| frames.len() != sequence.frame_count)
+            .is_some_and(|frames| frames.len() != display_frames)
     {
         return Err(CodecError::input(
             "decoded display-frame count differs from the descriptor",
@@ -735,8 +766,8 @@ pub fn decode(sequence: &EncodedSequence) -> Result<Vec<DecodedFrame>> {
         })
         .ok_or_else(|| CodecError::input("decoded frame dimensions overflow"))?;
     let channels = sequence.descriptor.pixel_layout.channels();
-    let mut decoded = Vec::with_capacity(sequence.frame_count);
-    for index in 0..sequence.frame_count {
+    let mut decoded = Vec::with_capacity(display_frames);
+    for index in 0..display_frames {
         let color = &colors[index];
         let alpha = alphas.as_ref().map(|frames| &frames[index]);
         if alpha.is_some_and(|alpha| {

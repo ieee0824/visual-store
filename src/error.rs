@@ -26,7 +26,11 @@ impl Error {
             | "E_UNSUPPORTED_IMAGE"
             | "E_UNSUPPORTED_METADATA"
             | "E_SOURCE_NOT_RETAINED" => 3,
-            "E_CONFLICT" | "E_BUSY" | "E_OUTPUT_EXISTS" | "E_SOURCE_CHANGED" => 4,
+            "E_CONFLICT"
+            | "E_BUSY"
+            | "E_OUTPUT_EXISTS"
+            | "E_SOURCE_CHANGED"
+            | "E_MIGRATION_INCOMPLETE" => 4,
             "E_INTEGRITY" | "E_SCHEMA_VERSION" | "E_STORE_MISMATCH" => 5,
             _ => 6,
         }

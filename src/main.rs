@@ -58,6 +58,8 @@ enum Command {
         #[arg(long)]
         run: Option<String>,
         #[arg(long)]
+        stream: Option<String>,
+        #[arg(long)]
         label: Option<String>,
         #[arg(long)]
         note: Option<String>,
@@ -94,6 +96,14 @@ enum Command {
         #[arg(long)]
         report: Option<PathBuf>,
     },
+    Migrate {
+        #[arg(long)]
+        to: u32,
+        #[arg(long, conflicts_with = "restore")]
+        resume: bool,
+        #[arg(long, conflicts_with = "resume")]
+        restore: bool,
+    },
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Variant {
@@ -107,6 +117,14 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
     if matches!(cli.command, Command::Init) {
         return Ok((Store::initialize(&cli.store)?, 0));
     }
+    if let Command::Migrate {
+        to,
+        resume,
+        restore,
+    } = &cli.command
+    {
+        return Ok((Store::migrate(&cli.store, *to, *resume, *restore)?, 0));
+    }
     let mut store = Store::open(&cli.store, matches!(cli.command, Command::Put { .. }))?;
     store.limits = limits.clone();
     let data = match cli.command {
@@ -114,6 +132,7 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
         Command::Put {
             file,
             run,
+            stream,
             label,
             note,
             tags,
@@ -125,6 +144,7 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
             &file,
             PutOptions {
                 run,
+                stream,
                 label,
                 note,
                 tags,
@@ -151,6 +171,7 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
             let code = if d["valid"] == false { 5 } else { 0 };
             return Ok((d, code));
         }
+        Command::Migrate { .. } => unreachable!(),
     };
     Ok((data, 0))
 }
@@ -166,7 +187,7 @@ fn emit(value: Value, code: i32) -> ! {
 }
 fn fail(error: Error) -> ! {
     let code = error.exit_code();
-    emit(json!({"schema_version":1,"ok":false,"error":error}), code)
+    emit(json!({"schema_version":2,"ok":false,"error":error}), code)
 }
 fn main() {
     let cli = match Cli::try_parse() {
@@ -181,9 +202,9 @@ fn main() {
         )),
     };
     match run(cli) {
-        Ok((data, 0)) => emit(json!({"schema_version":1,"ok":true,"data":data}), 0),
+        Ok((data, 0)) => emit(json!({"schema_version":2,"ok":true,"data":data}), 0),
         Ok((data, code)) => emit(
-            json!({"schema_version":1,"ok":false,"data":data,"error":Error::new("E_INTEGRITY","Store verification found integrity problems.")}),
+            json!({"schema_version":2,"ok":false,"data":data,"error":Error::new("E_INTEGRITY","Store verification found integrity problems.")}),
             code,
         ),
         Err(e) => fail(e),

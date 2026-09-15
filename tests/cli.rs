@@ -68,6 +68,7 @@ fn stdout_obeys_json_schema_and_size_budgets() {
     };
     check(&["list"], 4096);
     check(&["init"], 4096);
+    check(&["migrate", "--to", "2"], 4096);
     let p = check(
         &[
             "put",

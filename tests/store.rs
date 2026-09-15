@@ -14,6 +14,7 @@ fn initialization_preserves_id_and_unrelated_files() {
     h.error(&["list"], "E_STORE_NOT_INITIALIZED");
     let a = h.call(&["init"]);
     let b = h.call(&["init"]);
+    assert_eq!(a["schema_version"], 2);
     assert_eq!(a["store_id"], b["store_id"]);
     assert_eq!(b["already_initialized"], true);
     assert_eq!(
@@ -228,22 +229,40 @@ fn sparse_old_run_pages_correctly_among_many_newer_records() {
                  FROM digits a, digits b, digits c, digits d, digits e
              )
              INSERT INTO images(
-                 image_id,run,created_at,captured_at,label,note,tags_json,width,height,
-                 bit_depth,color_type,source_sha256,source_byte_length,stored_blob_sha256,
+                 image_id,run,stream,frame_no,created_at,captured_at,label,note,tags_json,
+                 width,height,bit_depth,color_type,source_sha256,source_byte_length,
                  source_blob_sha256,scanline_sha256,non_idat_sha256,pixel_sha256,
-                 encoding_version,compression_level,compression_applied,operation_id,
-                 operation_fingerprint,validation_limits_json
+                 operation_id,operation_fingerprint,operation_fingerprint_version,
+                 validation_limits_json
              )
              SELECT printf('10000000-0000-0000-0000-%012d',numbers.n),'common',
-                 template.created_at,template.captured_at,template.label,template.note,
-                 template.tags_json,template.width,template.height,template.bit_depth,
-                 template.color_type,template.source_sha256,template.source_byte_length,
-                 template.stored_blob_sha256,template.source_blob_sha256,
+                 'default',numbers.n-1,template.created_at,template.captured_at,
+                 template.label,template.note,template.tags_json,template.width,
+                 template.height,template.bit_depth,template.color_type,
+                 template.source_sha256,template.source_byte_length,template.source_blob_sha256,
                  template.scanline_sha256,template.non_idat_sha256,template.pixel_sha256,
-                 template.encoding_version,template.compression_level,
-                 template.compression_applied,NULL,NULL,template.validation_limits_json
+                 NULL,template.operation_fingerprint,template.operation_fingerprint_version,
+                 template.validation_limits_json
              FROM numbers CROSS JOIN images AS template
-             WHERE numbers.n BETWEEN 1 AND 30000 AND template.seq=1",
+             WHERE numbers.n BETWEEN 1 AND 30000 AND template.seq=1;
+
+             WITH digits(n) AS (VALUES(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)),
+             numbers(n) AS (
+                 SELECT a.n + 10*b.n + 100*c.n + 1000*d.n + 10000*e.n
+                 FROM digits a, digits b, digits c, digits d, digits e
+             )
+             INSERT INTO representations(
+                 image_id,representation_version,representation_kind,png_blob_sha256,
+                 segment_id,encoding_version,compression_level,compression_applied,
+                 created_at,verified_at
+             )
+             SELECT printf('10000000-0000-0000-0000-%012d',numbers.n),1,'png',
+                 representation.png_blob_sha256,NULL,representation.encoding_version,
+                 representation.compression_level,representation.compression_applied,
+                 representation.created_at,representation.verified_at
+             FROM numbers CROSS JOIN representations AS representation
+             WHERE numbers.n BETWEEN 1 AND 30000
+               AND representation.image_id=(SELECT image_id FROM images WHERE seq=1)",
         )
         .unwrap();
     drop(connection);

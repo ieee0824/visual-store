@@ -153,6 +153,21 @@ impl Dir {
         }
         Ok(())
     }
+
+    pub fn remove_file_if_exists(&self, component: &str) -> Result<bool> {
+        let n = name(component)?;
+        let rc = unsafe { libc::unlinkat(self.file.as_raw_fd(), n.as_ptr(), 0) };
+        if rc == 0 {
+            self.sync()?;
+            return Ok(true);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            Ok(false)
+        } else {
+            Err(error.into())
+        }
+    }
 }
 
 pub struct Temp<'a> {
@@ -190,6 +205,23 @@ impl<'a> Temp<'a> {
         }
         to.sync()?;
         Ok(true)
+    }
+
+    pub fn replace(&self, to: &Dir, component: &str) -> Result<()> {
+        self.file.sync_all()?;
+        let (old, new) = (name(&self.name)?, name(component)?);
+        let rc = unsafe {
+            libc::renameat(
+                self.dir.file.as_raw_fd(),
+                old.as_ptr(),
+                to.file.as_raw_fd(),
+                new.as_ptr(),
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        to.sync()
     }
 }
 impl Drop for Temp<'_> {

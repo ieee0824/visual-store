@@ -38,6 +38,7 @@ vstore --store "$PWD/.visual-store" init
 vstore --store "$PWD/.visual-store" put \
   --file artifacts/render.png \
   --run ui-check-20260915-a \
+  --stream browser-main \
   --label input-border \
   --note "Saved for later inspection; not viewed yet."
 
@@ -51,7 +52,7 @@ Every command except `--help` and `--version` emits one JSON value to stdout. Di
 
 Store selection uses `--store PATH`, then `VSTORE_ROOT`, then `$CWD/.visual-store`. It never searches parent directories. Keep `.visual-store/` out of Git; this repository's `.gitignore` already excludes its local store.
 
-Use `put --keep-source` when byte-for-byte retrieval of the input is required. Otherwise, only the validated lossless stored representation is retained. Use `--operation-id` for a retryable registration operation. Reusing an operation ID with different source bytes or metadata fails with `E_CONFLICT`.
+An observation with `--run` receives an immutable, zero-based `frame_no` within its `(run, stream)`; the stream defaults to `default`. Use `put --keep-source` when byte-for-byte retrieval of the input is required. Otherwise, only the validated lossless stored representation is retained. Use `--operation-id` for a retryable registration operation. Reusing an operation ID with different source bytes or metadata fails with `E_CONFLICT`.
 
 See [the CLI reference](docs/cli.md), [JSON Schema](docs/cli.schema.json), and [storage format](docs/storage-format.md) for the complete contract.
 
@@ -71,6 +72,8 @@ The integration was prepared against `codex-cli 0.154.0`. The automated tests ve
 ## Backup and maintenance
 
 Stop every `vstore` process, copy the entire store directory, then run `vstore --store COPY verify` on the copy. Do not copy only `index.sqlite3` while the store is active. The MVP does not delete records, blobs, exports, or temporary orphan candidates automatically.
+
+Format-version-1 stores remain readable but are read-only. Before writing, back up the complete store and explicitly run `vstore --store STORE migrate --to 2`. If interrupted, ordinary commands stop with `E_MIGRATION_INCOMPLETE`; use `--resume` to roll forward safely or `--restore` to return to the version-1 backup.
 
 The default store directory and files are created with POSIX modes `0700` and `0600`. Existing owners and permissions are not changed. Stores on network filesystems and multi-host concurrent use are unsupported.
 

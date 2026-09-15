@@ -1,0 +1,88 @@
+# Visual Store
+
+[日本語](README.md) | [English](README.en.md)
+
+Visual Store is a local PNG store for coding agents. It saves an image as an opaque `visual://` reference, returns compact JSON from the CLI, and materializes image files only when requested. Saving and retrieving never display an image or write its bytes to stdout.
+
+The MVP supports non-interlaced, static, 8-bit RGB and RGBA PNG files. It losslessly recompresses the existing filtered scanlines with zlib level 6, keeps the smaller valid representation, and deduplicates identical stored blobs by SHA-256. Image records remain separate so repeated observations are retained.
+
+## Why Rust
+
+This repository started as a Rust 2024 project. Rust gives the parser checked arithmetic and bounded buffers, supports a single local CLI binary, and has maintained libraries for PNG, zlib, SQLite, SHA-256, UUID, JSON, and CLI parsing. SQLite is built from the bundled source, so a separate SQLite installation is unnecessary. FFmpeg, ImageMagick, network access, and API keys are not used at runtime.
+
+## Install
+
+Requirements: a current stable Rust toolchain and a C compiler for bundled SQLite.
+
+```bash
+cargo install --path . --locked
+vstore --version
+```
+
+For development, replace `vstore` with `cargo run --locked --` in the examples below.
+
+## Quick start
+
+```bash
+vstore --store "$PWD/.visual-store" init
+
+vstore --store "$PWD/.visual-store" put \
+  --file artifacts/render.png \
+  --run ui-check-20260915-a \
+  --label input-border \
+  --note "Saved for later inspection; not viewed yet."
+
+vstore --store "$PWD/.visual-store" list --run ui-check-20260915-a --limit 20
+vstore --store "$PWD/.visual-store" info 'visual://STORE_ID/images/IMAGE_ID'
+vstore --store "$PWD/.visual-store" get 'visual://STORE_ID/images/IMAGE_ID'
+vstore --store "$PWD/.visual-store" verify
+```
+
+Every command except `--help` and `--version` emits one JSON value to stdout. Diagnostics do not contain image bytes. `get` returns an absolute local path and `displayed: false`; pass that path to an image viewer only when image content is needed.
+
+Store selection uses `--store PATH`, then `VSTORE_ROOT`, then `$CWD/.visual-store`. It never searches parent directories. Keep `.visual-store/` out of Git; this repository's `.gitignore` already excludes its local store.
+
+Use `put --keep-source` when byte-for-byte retrieval of the input is required. Otherwise, only the validated lossless stored representation is retained. Use `--operation-id` for a retryable registration operation. Reusing an operation ID with different source bytes or metadata fails with `E_CONFLICT`.
+
+See [the CLI reference](docs/cli.md), [JSON Schema](docs/cli.schema.json), and [storage format](docs/storage-format.md) for the complete contract.
+
+## Codex skill
+
+The repository includes [the Visual Store skill](skills/visual-store/SKILL.md). Codex scans project skills under `.agents/skills`; either copy the folder into this repository or symlink it while developing:
+
+```bash
+mkdir -p .agents/skills
+ln -s ../../skills/visual-store .agents/skills/visual-store
+```
+
+For use across repositories, copy `skills/visual-store` to `$HOME/.agents/skills/visual-store`. The CLI installation is separate from the Skill installation. Codex detects skill changes automatically in current releases; restart Codex if it does not appear. Invoke it explicitly with `$visual-store`, or let Codex select it for matching PNG storage tasks. These locations and invocation methods follow the [official OpenAI skill documentation](https://developers.openai.com/codex/skills/).
+
+The integration was prepared against `codex-cli 0.154.0`. The automated tests verify the CLI and Skill files, but a fresh Codex session's implicit selection and host image-viewer behavior still require a manual integration test.
+
+## Backup and maintenance
+
+Stop every `vstore` process, copy the entire store directory, then run `vstore --store COPY verify` on the copy. Do not copy only `index.sqlite3` while the store is active. The MVP does not delete records, blobs, exports, or temporary orphan candidates automatically.
+
+The default store directory and files are created with POSIX modes `0700` and `0600`. Existing owners and permissions are not changed. Stores on network filesystems and multi-host concurrent use are unsupported.
+
+## Development
+
+```bash
+cargo test --locked --features fault-injection
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo build --locked --release
+```
+
+The `fault-injection` feature exists only for isolated tests that terminate child processes at persistence boundaries or inject `ENOSPC`. Do not enable it in installed builds.
+
+Performance depends on image contents and hardware. Use [the benchmark procedure](docs/benchmark.md) on representative GUI, text-heavy, photographic, and incompressible fixtures. Record OS, CPU, release build, compression level, cache state, and concurrency with each result.
+
+## Dependencies and licensing
+
+Visual Store is licensed under MIT. Direct runtime dependencies are `base64`, `chrono`, `clap`, `crc32fast`, `flate2`, `libc`, `png`, `rusqlite`, `serde`, `serde_json`, `sha2`, and `uuid`. They are maintained Rust ecosystem crates and use MIT, Apache-2.0, or compatible terms; `rusqlite` is MIT and its bundled SQLite library is public domain. Test-only dependencies are `tempfile` and `jsonschema`. Exact resolved versions are committed in `Cargo.lock`.
+
+Before redistribution, audit the complete transitive dependency graph and notices for the target artifact. The project does not vendor third-party source or license files.
+
+## Platform status
+
+The implementation targets local filesystems on macOS and Linux and intentionally fails to compile elsewhere. Automated tests in this development session ran on macOS with Rust 1.97.0. Linux behavior remains unverified in this repository's current environment.

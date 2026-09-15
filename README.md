@@ -8,11 +8,20 @@ MVPは、非インターレースの静止8-bit RGB/RGBA PNGに対応してい�
 
 ## Rustを採用した理由
 
-このリポジトリはRust 2024のプロジェクトとして開始しました。Rustでは、パーサーの整数演算とバッファーを安全に制限でき、単一のローカルCLIバイナリとして配布できます。PNG、zlib、SQLite、SHA-256、UUID、JSON、CLI解析には保守されたライブラリを使用しています。SQLiteはソースをバンドルしてビルドするため、別途インストールする必要はありません。実行時にFFmpeg、ImageMagick、ネットワーク接続、APIキーは使用しません。
+このリポジトリはRust 2024のプロジェクトとして開始しました。Rustでは、パーサーの整数演算とバッファーを安全に制限でき、単一のローカルCLIバイナリとして配布できます。PNG、zlib、SQLite、SHA-256、UUID、JSON、CLI解析には保守されたライブラリを使用しています。SQLiteはソースをバンドルしてビルドします。時間方向コーデックはsystem libvpxへ直接リンクします。実行時にFFmpeg、ImageMagick、ネットワーク接続、APIキーは使用しません。
 
 ## インストール
 
-現在の安定版Rustツールチェーンと、バンドル版SQLiteを構築するためのCコンパイラーが必要です。
+現在の安定版Rustツールチェーン、Cコンパイラー、`pkg-config`、libvpx開発packageが必要です。
+
+```bash
+# macOS
+brew install libvpx pkg-config
+
+# Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install -y libvpx-dev pkg-config
+```
 
 ```bash
 cargo install --path . --locked
@@ -71,6 +80,7 @@ storeディレクトリとファイルは、POSIX環境でそれぞれ`0700`と`
 cargo test --locked --features fault-injection
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo build --locked --release
+cargo run --locked --example vp9_roundtrip
 ```
 
 `fault-injection` featureは、永続化境界で子プロセスを終了したり`ENOSPC`を発生させたりする隔離テスト専用です。インストール用ビルドでは有効にしないでください。
@@ -79,10 +89,10 @@ cargo build --locked --release
 
 ## 依存ライブラリとライセンス
 
-Visual StoreはMITライセンスです。実行時の直接依存は`base64`、`chrono`、`clap`、`crc32fast`、`flate2`、`libc`、`png`、`rusqlite`、`serde`、`serde_json`、`sha2`、`uuid`です。これらはMIT、Apache-2.0または互換ライセンスで提供され、`rusqlite`はMIT、バンドルされるSQLiteはパブリックドメインです。テスト専用依存は`tempfile`と`jsonschema`です。解決済みの正確なバージョンは`Cargo.lock`へ記録しています。
+Visual StoreはMITライセンスです。VP9 backendはBSD 3-Clauseのsystem libvpxを、MPL-2.0の`libvpx-native-sys` 5.0.17から呼び出します。ほかの実行時直接依存は`base64`、`chrono`、`clap`、`crc32fast`、`flate2`、`libc`、`png`、`rusqlite`、`serde`、`serde_json`、`sha2`、`uuid`です。これらはMIT、Apache-2.0または互換ライセンスで提供され、`rusqlite`はMIT、バンドルされるSQLiteはパブリックドメインです。テスト専用依存は`tempfile`と`jsonschema`です。解決済みの正確なRust crate版は`Cargo.lock`へ記録しています。採用版、可逆plane配置、system libraryの再現手順は[VP9 codec ADR](docs/adr/0001-vp9-lossless-codec.md)に記録しています。
 
 再配布前に、対象成果物の推移的依存関係とライセンス通知をすべて監査してください。このプロジェクトはサードパーティーのソースやライセンスファイルをvendorしていません。
 
 ## 対応環境
 
-ローカルファイルシステム上のmacOSとLinuxを対象とし、それ以外の環境では意図的にコンパイルエラーになります。この開発環境では、macOSとRust 1.97.0で自動テストを実行しました。Linuxは現在のリポジトリ環境では未検証です。
+ローカルファイルシステム上のmacOSとLinuxを対象とし、それ以外の環境では意図的にコンパイルエラーになります。CIは両OSでlibvpxを有効にしてテストします。この開発環境ではmacOS、Rust 1.95.0、libvpx 1.16.0でcodec試験を実行しました。

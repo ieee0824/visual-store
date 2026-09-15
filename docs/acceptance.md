@@ -45,3 +45,17 @@ The repository Skill passes the Skill Creator structural validator. A fresh sess
 This test is intentionally manual because it depends on host behavior and can invoke a paid remote model. No Codex session, goal, rollout, or internal database was modified by the automated suite.
 
 Representative performance measurements are also pending. [The benchmark procedure](benchmark.md) defines the required inputs and reporting method; private working screenshots are not included in the repository.
+
+## Temporal codec foundation acceptance
+
+Checked on 2026-09-15 with Rust 1.95.0 and system libvpx 1.16.0 on macOS. The `VP9 required` CI job runs the same codec coverage on macOS and Linux with VP9 enabled in the normal build.
+
+| ID | Status | Evidence |
+| --- | --- | --- |
+| V01 | Passed | `tests/temporal_codec.rs` passes multiple non-identical frames through one direct libvpx encoder and decoder and compares every decoded sample. |
+| V02 | Passed | libvpx parses a later compressed packet as non-key. The full sequence decodes exactly in one decoder context, while that same packet fails in a fresh decoder without preceding frame state, proving a real inter-frame dependency rather than a configured label. |
+| V03 | Passed | RGB and RGBA sequences round-trip exactly, including transparent and partially transparent pixels and nonzero hidden RGB at alpha 0. |
+| V04 | Passed | An odd 257×5 fixture covers every byte value 0–255, one-pixel red/green/blue lines, adjacent values, and a one-pixel frame change without a changed byte after decode. |
+| V13 codec boundary | Passed | The CI codec probe runs with an empty `PATH`; `ldd`/`otool` must show libvpx and must not show libavcodec, libavformat, libavutil, libswscale, or libswresample. End-to-end `pack`/`get` remains assigned to the segment and retrieval sub-issues. |
+
+The precise binding, baseline libvpx version, encoder configuration, reversible RGB/RGBA plane layout, licenses, and reproducible setup are recorded in [ADR 0001](adr/0001-vp9-lossless-codec.md).

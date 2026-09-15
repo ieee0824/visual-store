@@ -4,7 +4,7 @@ use std::{
     io::{self, Write},
     path::PathBuf,
 };
-use visual_store::{Error, PutOptions, Result, Store, image::Limits};
+use visual_store::{Error, PutOptions, Result, Store, image::Limits, store::PackOptions};
 
 #[derive(Parser)]
 #[command(
@@ -96,6 +96,28 @@ enum Command {
         #[arg(long)]
         report: Option<PathBuf>,
     },
+    Pack {
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        stream: Option<String>,
+        #[arg(long, value_enum, default_value_t = Codec::Vp9)]
+        codec: Codec,
+        #[arg(long, default_value_t = 32)]
+        segment_frames: usize,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, default_value_t = 134217728)]
+        max_segment_bytes: usize,
+        #[arg(long, default_value_t = 1024)]
+        max_segment_packets: usize,
+        #[arg(long, default_value_t = 67108864)]
+        max_reconstruction_bytes: usize,
+        #[arg(long, default_value_t = 10000)]
+        max_pack_images: usize,
+        #[arg(long, default_value_t = 300)]
+        max_encode_seconds: u64,
+    },
     Migrate {
         #[arg(long)]
         to: u32,
@@ -109,6 +131,10 @@ enum Command {
 enum Variant {
     Stored,
     Source,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum Codec {
+    Vp9,
 }
 
 fn run(cli: Cli) -> Result<(Value, i32)> {
@@ -125,7 +151,8 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
     {
         return Ok((Store::migrate(&cli.store, *to, *resume, *restore)?, 0));
     }
-    let mut store = Store::open(&cli.store, matches!(cli.command, Command::Put { .. }))?;
+    let writable = matches!(cli.command, Command::Put { .. } | Command::Pack { .. });
+    let mut store = Store::open(&cli.store, writable)?;
     store.limits = limits.clone();
     let data = match cli.command {
         Command::Init => unreachable!(),
@@ -171,6 +198,38 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
             let code = if d["valid"] == false { 5 } else { 0 };
             return Ok((d, code));
         }
+        Command::Pack {
+            run,
+            stream,
+            codec: _,
+            segment_frames,
+            dry_run,
+            max_segment_bytes,
+            max_segment_packets,
+            max_reconstruction_bytes,
+            max_pack_images,
+            max_encode_seconds,
+        } => {
+            let outcome = store.pack(PackOptions {
+                run,
+                stream,
+                segment_frames,
+                dry_run,
+                max_segment_bytes,
+                max_segment_packets,
+                max_reconstruction_bytes,
+                max_pack_images,
+                max_encode_seconds,
+                limits,
+            })?;
+            if let Some(error) = outcome.error {
+                return Ok((
+                    json!({"pack":outcome.data,"pack_error":error}),
+                    error.exit_code(),
+                ));
+            }
+            outcome.data
+        }
         Command::Migrate { .. } => unreachable!(),
     };
     Ok((data, 0))
@@ -203,10 +262,20 @@ fn main() {
     };
     match run(cli) {
         Ok((data, 0)) => emit(json!({"schema_version":2,"ok":true,"data":data}), 0),
-        Ok((data, code)) => emit(
-            json!({"schema_version":2,"ok":false,"data":data,"error":Error::new("E_INTEGRITY","Store verification found integrity problems.")}),
-            code,
-        ),
+        Ok((data, code)) => {
+            let error = data.get("pack_error").cloned().unwrap_or_else(|| {
+                serde_json::to_value(Error::new(
+                    "E_INTEGRITY",
+                    "Store verification found integrity problems.",
+                ))
+                .unwrap()
+            });
+            let data = data.get("pack").cloned().unwrap_or(data);
+            emit(
+                json!({"schema_version":2,"ok":false,"data":data,"error":error}),
+                code,
+            )
+        }
         Err(e) => fail(e),
     }
 }

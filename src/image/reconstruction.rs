@@ -16,6 +16,8 @@ const MAGIC: &[u8; 8] = b"VSPNGR\0\0";
 pub const OBJECT_KIND: &str = "png_reconstruction";
 /// Media type stored beside an immutable descriptor blob.
 pub const MEDIA_TYPE: &str = "application/vnd.visual-store.png-reconstruction-v1";
+/// Managed-object filename extension.
+pub const FILE_EXTENSION: &str = "pngr";
 /// Canonical binary descriptor format version.
 pub const FORMAT_VERSION: u16 = 1;
 const HEADER_BYTES: usize = 8 + 2 + 4 + 4;

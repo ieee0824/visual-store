@@ -20,7 +20,7 @@ Failures set a nonzero exit status and use:
 {"schema_version":2,"ok":false,"error":{"code":"E_...","message":"...","retryable":false}}
 ```
 
-`verify` includes its bounded report under `data` when integrity problems are found. The machine-readable contract is [cli.schema.json](cli.schema.json). The previous response contract remains archived as [cli.schema.v1.json](cli.schema.v1.json); clients must select the schema by the envelope's `schema_version`.
+`verify` includes its bounded report under `data` when integrity problems are found. `pack` likewise includes a compact partial report under `data` if codec or persistence work fails. The machine-readable contract is [cli.schema.json](cli.schema.json). The previous response contract remains archived as [cli.schema.v1.json](cli.schema.v1.json); clients must select the schema by the envelope's `schema_version`.
 
 ## Commands
 
@@ -64,6 +64,23 @@ Runs SQLite integrity and foreign-key checks, validates the manifest/store ID, v
 
 The stdout report contains counts and at most 20 examples. `--report NEW_FILE` writes every issue to a newly created JSON file. Integrity errors produce exit status 5. Files not referenced by the database are reported as `unreferenced_candidate`; they are not deleted or treated as corruption on that fact alone.
 
+### pack
+
+Required: `--run RUN`. Optional: `--stream STREAM`, `--codec vp9`,
+`--segment-frames 2..128` (default 32), and `--dry-run`. Finite safety bounds are
+`--max-segment-bytes`, `--max-segment-packets`, `--max-reconstruction-bytes`,
+`--max-pack-images`, and `--max-encode-seconds`.
+
+The command freezes eligible active PNG observations at its starting sequence,
+then groups only consecutive frames from the same stream with identical dimensions
+and RGB/RGBA layout. Encoding and round-trip verification occur before a short
+SQLite write transaction. A candidate activates only when its color/alpha packet
+containers, reconstruction descriptors, and codec descriptor together are smaller
+than the distinct active PNG objects they replace. Otherwise PNG remains active and
+the report says `not_beneficial`. Published segments are immutable and begin with a
+keyframe; retired PNGs remain available. Re-running pack never renumbers frames or
+repacks finalized segments.
+
 ### migrate
 
 `migrate --to 2` is the only operation that upgrades a version-1 store. Merely opening an old store never changes it: read operations remain available, while `put` returns `E_SCHEMA_VERSION` until migration. Stop other writers and back up the whole store before migration.
@@ -93,6 +110,6 @@ Metadata limits are run and stream 128 bytes each, label 256 bytes, note 2,048 b
 | 3 | missing or unsupported | `E_NOT_FOUND`, `E_STORE_NOT_INITIALIZED`, `E_UNSUPPORTED_IMAGE`, `E_UNSUPPORTED_METADATA`, `E_SOURCE_NOT_RETAINED` |
 | 4 | conflict or temporary failure | `E_CONFLICT`, `E_BUSY`, `E_OUTPUT_EXISTS`, `E_SOURCE_CHANGED`, `E_MIGRATION_INCOMPLETE` |
 | 5 | integrity or version | `E_INTEGRITY`, `E_SCHEMA_VERSION`, `E_STORE_MISMATCH` |
-| 6 | I/O or environment | `E_IO`, `E_PERMISSION`, `E_DISK_FULL` |
+| 6 | I/O, codec, or environment | `E_IO`, `E_PERMISSION`, `E_DISK_FULL`, `E_CODEC_FAILURE` |
 
 Only `E_BUSY` and `E_SOURCE_CHANGED` report `retryable: true`. This means a bounded retry may succeed; it does not direct an automatic unbounded retry.

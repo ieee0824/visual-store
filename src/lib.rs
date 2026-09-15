@@ -6,6 +6,7 @@ pub mod codec;
 pub mod error;
 mod filesystem;
 pub mod image;
+pub mod segment;
 pub mod store;
 
 pub use error::{Error, Result};

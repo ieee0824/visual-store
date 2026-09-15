@@ -7,6 +7,8 @@ STORE/
   index.sqlite3-wal       # may exist while in use
   index.sqlite3-shm       # may exist while in use
   objects/sha256/ab/cd/FULL_SHA256.png
+  objects/sha256/ab/cd/FULL_SHA256.vpxs
+  objects/sha256/ab/cd/FULL_SHA256.pngr
   tmp/
   exports/
   migration-v1-to-v2.json        # only while migration is incomplete
@@ -37,6 +39,14 @@ The stored PNG preserves IHDR values, the byte-exact decompressed filtered scanl
 Version 2 accepts static, non-interlaced, 8-bit RGB/RGBA PNG. It validates the PNG signature, chunk lengths and types, reserved bits, CRCs, critical ordering, contiguous IDAT stream, bounded zlib termination, filter bytes, and decoded samples. Unknown critical chunks and unknown ancillary chunks marked unsafe to copy are rejected. Accepted ancillary chunks are preserved and never interpreted as instructions.
 
 The canonical reconstruction descriptor is specified in [ADR 0002](adr/0002-png-reconstruction.md). It preserves original IHDR, every accepted non-IDAT chunk in order and on the same side of IDAT, plus one original filter type per row. After codec decode, Visual Store recreates filtered scanlines from packed samples and those filters, verifies the unchanged pixel, scanline, and non-IDAT hashes, rebuilds a PNG, and passes it through the same strict validator before publication. RGBA reconstruction includes alpha and nonzero hidden RGB beneath alpha zero. Rebuilt zlib bytes and IDAT boundaries are not required to match the pre-pack file; a retained source blob remains byte-identical.
+
+Temporal packing stores each color or alpha stream in the bounded `VSVP9` packet
+container specified by [ADR 0003](adr/0003-temporal-segments.md). A complete candidate
+is encoded and decoded outside a write transaction. Immutable objects are synced
+before one short transaction inserts typed blobs, segment and frame mappings, retires
+the old PNG representation, and activates the new representation. A crash before
+commit can leave only complete unreferenced candidates; a crash after commit leaves
+the entire segment active. Retired PNG objects are not deleted by pack.
 
 ## Blob publication order
 

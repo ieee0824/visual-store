@@ -63,5 +63,11 @@ Checked on 2026-09-15 with Rust 1.95.0 and system libvpx 1.16.0 on macOS. The `V
 | V19 schema migration boundary | Passed | The fixed v1 fixture can be read, verified, and materialized without mutation. Explicit migration preserves the store/image UUIDs, ref, seq, source identity, metadata, hashes, original PNG bytes, and legacy operation behavior while assigning `default` stream/frame 0. |
 | V20 schema migration boundary | Passed | Fault injection terminates migration after backup, journal, database, manifest, history, and cleanup boundaries—including database version 2 with manifest version 1. Normal access blocks ambiguous states; `--resume` rolls each state forward, and interrupted `--restore` returns safely to v1. |
 | V21 reconstruction boundary | Passed | Reconstruction is pure over the input bytes and tests assert that the original PNG remains unchanged. Existing store tests retain and retrieve `--keep-source` bytes exactly; pack/prune coverage remains assigned to their publication and cleanup changes. |
+| V02/V06 segment publication | Passed | Multi-frame containers preserve packet timing and flags and decode every display frame; pack boundaries and a single-frame tail are covered by `tests/pack.rs`. |
+| V07 compatibility boundaries | Passed | Packing splits at stream, frame gap, dimensions, and RGB/RGBA layout boundaries. |
+| V14 retry/no-op | Passed | Dry-run publishes nothing, successful retry is a no-op, and committed segment rows are immutable. |
+| V15/V16 failure and limits | Passed | Fault points surround publication/commit; packet, byte, metadata, image-count, memory, and wall-clock limits fail explicitly. |
+| V17 concurrency | Passed | A frozen sequence and active-representation compare-and-swap exclude concurrent additions and representation changes. |
+| V23 accounting | Passed | Accounting includes distinct color, alpha, reconstruction and descriptor bytes; identical inputs retain PNG when temporal bytes are not smaller. |
 
 The precise binding, baseline libvpx version, encoder configuration, reversible RGB/RGBA plane layout, licenses, and reproducible setup are recorded in [ADR 0001](adr/0001-vp9-lossless-codec.md).

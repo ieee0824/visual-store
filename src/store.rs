@@ -3,7 +3,8 @@ use crate::{
     error::{integrity, invalid},
     fault,
     filesystem::{self, Dir, Temp},
-    image::{self, Limits},
+    image::{self, Limits, reconstruction::ReconstructionMetadata},
+    segment::{self, SegmentLimits},
     sha256,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -15,6 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, io::Write, path::Path, time::Duration};
 use uuid::Uuid;
+
+mod pack;
+pub use pack::{PackOptions, PackOutcome};
 
 const ENCODING: &str = "png-idat-zlib-v1";
 const CURRENT_FORMAT_VERSION: u32 = 2;
@@ -31,8 +35,8 @@ const MIGRATION_BACKUP_FILES: [&str; 4] = [
 const LIST_DATA_BUDGET_BYTES: usize = 16 * 1024 - 64;
 const LIST_ALL_SQL_V1: &str = "SELECT image_id,seq,run,NULL,NULL,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE seq<=?1 AND seq<?2 ORDER BY seq DESC LIMIT ?3";
 const LIST_RUN_SQL_V1: &str = "SELECT image_id,seq,run,NULL,NULL,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE run=?1 AND seq<=?2 AND seq<?3 ORDER BY seq DESC LIMIT ?4";
-const LIST_ALL_SQL_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.label,i.width,i.height,i.created_at,b.byte_length FROM images i JOIN representations r ON r.image_id=i.image_id AND r.representation_kind='png' JOIN blobs b ON b.sha256=r.png_blob_sha256 WHERE i.seq<=?1 AND i.seq<?2 ORDER BY i.seq DESC LIMIT ?3";
-const LIST_RUN_SQL_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.label,i.width,i.height,i.created_at,b.byte_length FROM images i JOIN representations r ON r.image_id=i.image_id AND r.representation_kind='png' JOIN blobs b ON b.sha256=r.png_blob_sha256 WHERE i.run=?1 AND i.seq<=?2 AND i.seq<?3 ORDER BY i.seq DESC LIMIT ?4";
+const LIST_ALL_SQL_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.label,i.width,i.height,i.created_at,b.byte_length FROM images i JOIN representations r ON r.image_id=i.image_id LEFT JOIN retired_representations rr ON rr.retired_id=(SELECT retired_id FROM retired_representations WHERE image_id=i.image_id AND representation_kind='png' AND prune_state!='deleted' ORDER BY representation_version DESC LIMIT 1) JOIN blobs b ON b.sha256=CASE WHEN r.representation_kind='png' THEN r.png_blob_sha256 ELSE rr.png_blob_sha256 END WHERE i.seq<=?1 AND i.seq<?2 ORDER BY i.seq DESC LIMIT ?3";
+const LIST_RUN_SQL_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.label,i.width,i.height,i.created_at,b.byte_length FROM images i JOIN representations r ON r.image_id=i.image_id LEFT JOIN retired_representations rr ON rr.retired_id=(SELECT retired_id FROM retired_representations WHERE image_id=i.image_id AND representation_kind='png' AND prune_state!='deleted' ORDER BY representation_version DESC LIMIT 1) JOIN blobs b ON b.sha256=CASE WHEN r.representation_kind='png' THEN r.png_blob_sha256 ELSE rr.png_blob_sha256 END WHERE i.run=?1 AND i.seq<=?2 AND i.seq<?3 ORDER BY i.seq DESC LIMIT ?4";
 type PriorOperation = (String, String, u32, Option<String>, Option<String>);
 fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
@@ -235,11 +239,49 @@ pub struct ImageRecord {
     #[serde(skip)]
     source_blob: Option<String>,
 }
-const SELECT_IMAGE_V1: &str = "SELECT i.image_id,i.seq,i.run,NULL,NULL,i.created_at,i.captured_at,i.label,i.note,i.tags_json,i.width,i.height,i.bit_depth,i.color_type,i.source_sha256,i.source_byte_length,i.stored_blob_sha256,b.byte_length,i.source_blob_sha256,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,i.encoding_version,i.compression_level,i.compression_applied FROM images i JOIN blobs b ON b.sha256=i.stored_blob_sha256";
-const SELECT_IMAGE_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.created_at,i.captured_at,i.label,i.note,i.tags_json,i.width,i.height,i.bit_depth,i.color_type,i.source_sha256,i.source_byte_length,r.png_blob_sha256,b.byte_length,i.source_blob_sha256,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,r.encoding_version,r.compression_level,r.compression_applied FROM images i JOIN representations r ON r.image_id=i.image_id AND r.representation_kind='png' JOIN blobs b ON b.sha256=r.png_blob_sha256";
+const SELECT_IMAGE_V1: &str = "SELECT i.image_id,i.seq,i.run,NULL,NULL,i.created_at,i.captured_at,i.label,i.note,i.tags_json,i.width,i.height,i.bit_depth,i.color_type,i.source_sha256,i.source_byte_length,i.stored_blob_sha256,b.byte_length,i.source_blob_sha256,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,i.encoding_version,i.compression_level,i.compression_applied,'png' FROM images i JOIN blobs b ON b.sha256=i.stored_blob_sha256";
+const SELECT_IMAGE_V2: &str = "SELECT i.image_id,i.seq,i.run,i.stream,i.frame_no,i.created_at,i.captured_at,i.label,i.note,i.tags_json,i.width,i.height,i.bit_depth,i.color_type,i.source_sha256,i.source_byte_length,CASE WHEN r.representation_kind='png' THEN r.png_blob_sha256 ELSE rr.png_blob_sha256 END,b.byte_length,i.source_blob_sha256,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,CASE WHEN r.representation_kind='png' THEN r.encoding_version ELSE rr.encoding_version END,CASE WHEN r.representation_kind='png' THEN r.compression_level ELSE NULL END,CASE WHEN r.representation_kind='png' THEN r.compression_applied ELSE NULL END,r.representation_kind FROM images i JOIN representations r ON r.image_id=i.image_id LEFT JOIN retired_representations rr ON rr.retired_id=(SELECT retired_id FROM retired_representations WHERE image_id=i.image_id AND representation_kind='png' AND prune_state!='deleted' ORDER BY representation_version DESC LIMIT 1) JOIN blobs b ON b.sha256=CASE WHEN r.representation_kind='png' THEN r.png_blob_sha256 ELSE rr.png_blob_sha256 END";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetiredPngEncoding {
+    version: u8,
+    encoding_version: String,
+    compression_level: u32,
+    compression_applied: bool,
+}
+
 fn row_image(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
     let tags: String = r.get(9)?;
     let source_blob: Option<String> = r.get(18)?;
+    let active_kind: String = r.get(25)?;
+    let encoding: String = r.get(22)?;
+    let (encoding_version, compression_level, compression_applied) = if active_kind == "png" {
+        (encoding, r.get(23)?, r.get(24)?)
+    } else {
+        let retired: RetiredPngEncoding = serde_json::from_str(&encoding).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                22,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        if retired.version != 1 {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                22,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unsupported retired PNG metadata",
+                )),
+            ));
+        }
+        (
+            retired.encoding_version,
+            retired.compression_level,
+            retired.compression_applied,
+        )
+    };
     Ok(ImageRecord {
         image_id: r.get(0)?,
         seq: r.get(1)?,
@@ -266,9 +308,9 @@ fn row_image(r: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
         scanline_sha256: r.get(19)?,
         non_idat_sha256: r.get(20)?,
         pixel_sha256: r.get(21)?,
-        encoding_version: r.get(22)?,
-        compression_level: r.get(23)?,
-        compression_applied: r.get(24)?,
+        encoding_version,
+        compression_level,
+        compression_applied,
     })
 }
 
@@ -799,16 +841,49 @@ impl Store {
             .child(&hash[2..4], create)
     }
     fn blob_path(hash: &str) -> String {
-        format!("objects/sha256/{}/{}/{}.png", &hash[..2], &hash[2..4], hash)
+        Self::object_path(hash, "png")
+    }
+    fn object_path(hash: &str, extension: &str) -> String {
+        format!(
+            "objects/sha256/{}/{}/{}.{}",
+            &hash[..2],
+            &hash[2..4],
+            hash,
+            extension
+        )
     }
     fn blob_bytes(&self, hash: &str, length: u64) -> Result<Vec<u8>> {
+        self.object_bytes(hash, length, "png", self.limits.source_bytes)
+    }
+    fn object_bytes(
+        &self,
+        hash: &str,
+        length: u64,
+        extension: &str,
+        limit: usize,
+    ) -> Result<Vec<u8>> {
         let dir = self
             .blob_dir(hash, false)
             .map_err(|_| integrity("Blob directory missing or unsafe."))?;
         let mut f = dir
-            .open_file(&format!("{hash}.png"))
+            .open_file(&format!("{hash}.{extension}"))
             .map_err(|_| integrity("Blob missing or unsafe."))?;
-        filesystem::check_hash(&mut f, length, hash, self.limits.source_bytes)
+        filesystem::check_hash(&mut f, length, hash, limit)
+    }
+    fn save_object(&self, bytes: &[u8], extension: &str) -> Result<(String, bool)> {
+        let hash = sha256(bytes);
+        let dir = self.blob_dir(&hash, true)?;
+        let tmp = self.root.child("tmp", false)?;
+        let mut temp = Temp::new(&tmp)?;
+        temp.file.write_all(bytes)?;
+        temp.file.sync_all()?;
+        let reused = !temp.publish(&dir, &format!("{hash}.{extension}"))?;
+        if reused {
+            let mut file = dir.open_file(&format!("{hash}.{extension}"))?;
+            filesystem::check_hash(&mut file, bytes.len() as u64, &hash, bytes.len())?;
+            dir.sync()?;
+        }
+        Ok((hash, reused))
     }
     fn save_blob(&self, bytes: &[u8]) -> Result<(String, bool)> {
         let hash = sha256(bytes);
@@ -821,8 +896,8 @@ impl Store {
         fault("before_blob_publish")?;
         let reused = !temp.publish(&dir, &format!("{hash}.png"))?;
         if reused {
-            let mut f = dir.open_file(&format!("{hash}.png"))?;
-            filesystem::check_hash(&mut f, bytes.len() as u64, &hash, bytes.len())?;
+            let mut file = dir.open_file(&format!("{hash}.png"))?;
+            filesystem::check_hash(&mut file, bytes.len() as u64, &hash, bytes.len())?;
             // The winning writer may not yet have synced the parent directory.
             dir.sync()?;
         }
@@ -1152,9 +1227,12 @@ impl Store {
             }
         }
         let mut blob_count = 0u64;
-        let mut stmt = tx.prepare(
-            "SELECT sha256,relative_path,byte_length,media_type FROM blobs ORDER BY sha256",
-        )?;
+        let blob_query = if self.format_version == 1 {
+            "SELECT sha256,relative_path,byte_length,media_type,'png' FROM blobs ORDER BY sha256"
+        } else {
+            "SELECT sha256,relative_path,byte_length,media_type,object_kind FROM blobs ORDER BY sha256"
+        };
+        let mut stmt = tx.prepare(blob_query)?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             blob_count += 1;
@@ -1162,10 +1240,36 @@ impl Store {
             let path: String = row.get(1)?;
             let length: u64 = row.get(2)?;
             let media: String = row.get(3)?;
+            let kind: String = row.get(4)?;
             let check = (|| -> Result<()> {
-                let bytes = self.blob_bytes(&hash, length)?;
-                if path != Self::blob_path(&hash) || media != "image/png" {
+                let (extension, expected_media) = match kind.as_str() {
+                    "png" => ("png", "image/png"),
+                    segment::OBJECT_KIND => (segment::FILE_EXTENSION, segment::MEDIA_TYPE),
+                    crate::image::reconstruction::OBJECT_KIND => (
+                        crate::image::reconstruction::FILE_EXTENSION,
+                        crate::image::reconstruction::MEDIA_TYPE,
+                    ),
+                    _ => return Err(integrity("Unknown blob object kind.")),
+                };
+                let bytes =
+                    self.object_bytes(&hash, length, extension, self.limits.memory_bytes)?;
+                if path != Self::object_path(&hash, extension) || media != expected_media {
                     return Err(integrity("Blob metadata mismatch."));
+                }
+                if kind == segment::OBJECT_KIND {
+                    segment::decode_container(
+                        &bytes,
+                        &SegmentLimits {
+                            max_bytes: self.limits.memory_bytes,
+                            max_packets: 1024,
+                            max_descriptor_bytes: 16 * 1024,
+                        },
+                    )?;
+                    return Ok(());
+                }
+                if kind == crate::image::reconstruction::OBJECT_KIND {
+                    ReconstructionMetadata::from_bytes(&bytes, &self.limits)?;
+                    return Ok(());
                 }
                 let meta = image::validate(&bytes, &self.limits)?;
                 let image_query = if self.format_version == 1 {
@@ -1174,7 +1278,7 @@ impl Store {
                     )
                 } else {
                     format!(
-                        "{SELECT_IMAGE_V2} WHERE r.png_blob_sha256=?1 OR i.source_blob_sha256=?1"
+                        "{SELECT_IMAGE_V2} WHERE r.png_blob_sha256=?1 OR rr.png_blob_sha256=?1 OR i.source_blob_sha256=?1"
                     )
                 };
                 let mut images = tx.prepare(&image_query)?;
@@ -1221,7 +1325,10 @@ impl Store {
                 for entry in fs::read_dir(&d2.path)? {
                     let entry = entry?;
                     let filename = entry.file_name().to_string_lossy().into_owned();
-                    let hash = filename.strip_suffix(".png").unwrap_or("");
+                    let hash = [".png", ".vpxs", ".pngr"]
+                        .iter()
+                        .find_map(|suffix| filename.strip_suffix(suffix))
+                        .unwrap_or("");
                     if !entry.file_type()?.is_file()
                         || hash.len() != 64
                         || !hash.starts_with(&format!("{a}{b}"))
@@ -1235,7 +1342,7 @@ impl Store {
                     let reference_query = if self.format_version == 1 {
                         "SELECT EXISTS(SELECT 1 FROM images WHERE stored_blob_sha256=?1 OR source_blob_sha256=?1)"
                     } else {
-                        "SELECT EXISTS(SELECT 1 FROM images i LEFT JOIN representations r ON r.image_id=i.image_id WHERE r.png_blob_sha256=?1 OR i.source_blob_sha256=?1)"
+                        "SELECT EXISTS(SELECT 1 FROM images i LEFT JOIN representations r ON r.image_id=i.image_id LEFT JOIN retired_representations rr ON rr.image_id=i.image_id AND rr.prune_state!='deleted' LEFT JOIN frame_locations fl ON fl.image_id=i.image_id LEFT JOIN segments s ON s.segment_id=fl.segment_id LEFT JOIN png_reconstruction pr ON pr.image_id=i.image_id WHERE r.png_blob_sha256=?1 OR rr.png_blob_sha256=?1 OR i.source_blob_sha256=?1 OR s.color_blob_sha256=?1 OR s.alpha_blob_sha256=?1 OR pr.descriptor_blob_sha256=?1)"
                     };
                     let referenced: bool =
                         tx.query_row(reference_query, [hash], |row| row.get(0))?;

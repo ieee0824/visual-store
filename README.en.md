@@ -8,11 +8,20 @@ The MVP supports non-interlaced, static, 8-bit RGB and RGBA PNG files. It lossle
 
 ## Why Rust
 
-This repository started as a Rust 2024 project. Rust gives the parser checked arithmetic and bounded buffers, supports a single local CLI binary, and has maintained libraries for PNG, zlib, SQLite, SHA-256, UUID, JSON, and CLI parsing. SQLite is built from the bundled source, so a separate SQLite installation is unnecessary. FFmpeg, ImageMagick, network access, and API keys are not used at runtime.
+This repository started as a Rust 2024 project. Rust gives the parser checked arithmetic and bounded buffers, supports a single local CLI binary, and has maintained libraries for PNG, zlib, SQLite, SHA-256, UUID, JSON, and CLI parsing. SQLite is built from bundled source. The temporal codec links directly to the system libvpx. FFmpeg, ImageMagick, network access, and API keys are not used at runtime.
 
 ## Install
 
-Requirements: a current stable Rust toolchain and a C compiler for bundled SQLite.
+Requirements: a current stable Rust toolchain, a C compiler, `pkg-config`, and the libvpx development package.
+
+```bash
+# macOS
+brew install libvpx pkg-config
+
+# Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install -y libvpx-dev pkg-config
+```
 
 ```bash
 cargo install --path . --locked
@@ -71,6 +80,7 @@ The default store directory and files are created with POSIX modes `0700` and `0
 cargo test --locked --features fault-injection
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo build --locked --release
+cargo run --locked --example vp9_roundtrip
 ```
 
 The `fault-injection` feature exists only for isolated tests that terminate child processes at persistence boundaries or inject `ENOSPC`. Do not enable it in installed builds.
@@ -79,10 +89,10 @@ Performance depends on image contents and hardware. Use [the benchmark procedure
 
 ## Dependencies and licensing
 
-Visual Store is licensed under MIT. Direct runtime dependencies are `base64`, `chrono`, `clap`, `crc32fast`, `flate2`, `libc`, `png`, `rusqlite`, `serde`, `serde_json`, `sha2`, and `uuid`. They are maintained Rust ecosystem crates and use MIT, Apache-2.0, or compatible terms; `rusqlite` is MIT and its bundled SQLite library is public domain. Test-only dependencies are `tempfile` and `jsonschema`. Exact resolved versions are committed in `Cargo.lock`.
+Visual Store is licensed under MIT. The VP9 backend calls the BSD 3-Clause system libvpx through `libvpx-native-sys` 5.0.17, which is MPL-2.0. Other direct runtime dependencies are `base64`, `chrono`, `clap`, `crc32fast`, `flate2`, `libc`, `png`, `rusqlite`, `serde`, `serde_json`, `sha2`, and `uuid`. They use MIT, Apache-2.0, or compatible terms; `rusqlite` is MIT and its bundled SQLite library is public domain. Test-only dependencies are `tempfile` and `jsonschema`. Exact resolved Rust crate versions are committed in `Cargo.lock`. The selected versions, reversible plane mapping, and system-library reproduction steps are recorded in the [VP9 codec ADR](docs/adr/0001-vp9-lossless-codec.md).
 
 Before redistribution, audit the complete transitive dependency graph and notices for the target artifact. The project does not vendor third-party source or license files.
 
 ## Platform status
 
-The implementation targets local filesystems on macOS and Linux and intentionally fails to compile elsewhere. Automated tests in this development session ran on macOS with Rust 1.97.0. Linux behavior remains unverified in this repository's current environment.
+The implementation targets local filesystems on macOS and Linux and intentionally fails to compile elsewhere. CI tests both systems with libvpx enabled. Codec tests in this development environment ran on macOS with Rust 1.95.0 and libvpx 1.16.0.

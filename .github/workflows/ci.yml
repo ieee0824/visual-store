@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  vp9-required:
+    name: VP9 required (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libvpx on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libvpx-dev pkg-config
+
+      - name: Install libvpx on macOS
+        if: runner.os == 'macOS'
+        run: brew install libvpx pkg-config
+
+      - name: Select Rust 1.95.0
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component clippy
+          rustup default 1.95.0
+
+      - name: Record codec toolchain
+        run: |
+          rustc --version
+          pkg-config --modversion vpx
+
+      - name: Test
+        run: cargo test --locked --features fault-injection
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Build no-command codec probe
+        run: cargo build --locked --example vp9_roundtrip
+
+      - name: Prove codec works with an empty PATH
+        run: PATH= ./target/debug/examples/vp9_roundtrip
+
+      - name: Check Linux dynamic codec dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ldd target/debug/examples/vp9_roundtrip | tee /tmp/visual-store-linked-libraries.txt
+          grep -q 'libvpx' /tmp/visual-store-linked-libraries.txt
+          if grep -Eq 'libav(codec|format|util)|libswscale|libswresample' /tmp/visual-store-linked-libraries.txt; then
+            exit 1
+          fi
+
+      - name: Check macOS dynamic codec dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          otool -L target/debug/examples/vp9_roundtrip | tee /tmp/visual-store-linked-libraries.txt
+          grep -q 'libvpx' /tmp/visual-store-linked-libraries.txt
+          if grep -Eq 'libav(codec|format|util)|libswscale|libswresample' /tmp/visual-store-linked-libraries.txt; then
+            exit 1
+          fi

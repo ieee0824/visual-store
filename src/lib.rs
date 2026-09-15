@@ -2,6 +2,7 @@
 #[cfg(not(unix))]
 compile_error!("Visual Store currently requires Linux or macOS.");
 
+pub mod codec;
 pub mod error;
 mod filesystem;
 pub mod image;

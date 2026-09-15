@@ -28,7 +28,7 @@ cargo test --locked --offline --features fault-injection
 | T18 | Passed | Cross-store references and cursors, filter-mismatched cursors, malformed cursors, and invalid limits fail explicitly. |
 | T19 | Passed | Deleted and corrupted blobs make get/verify fail; no repair or deletion occurs. |
 | T20 | Passed | Existing files, valid symlinks, dangling symlinks, and a symlinked managed export directory are not overwritten or followed. |
-| T21 | Passed | CLI output validates against `docs/cli.schema.json`, respects command budgets, and contains neither PNG signatures encoded as Base64 nor data URLs. |
+| T21 | Passed | CLI output validates against `docs/cli.schema.json`, respects command budgets, and contains neither PNG signatures encoded as Base64 nor data URLs. List coverage includes 20- and 100-item limits, JSON-escaped metadata, and lossless cursor continuation under the 16 KiB stdout budget. |
 | T22 | Passed | An offline copy of the entire closed store resolves references, verifies, and materializes an image. |
 | T23 | Passed | Verification succeeds with an empty `PATH`; no FFmpeg or external image command is invoked. |
 | T24 | Baseline established | A fixed version-1 store with a stable ref, blob hash, PNG, and SQLite index is copied and exercised by get/verify. Future dependency updates must keep this test passing. No dependency update has occurred since the baseline was created. |

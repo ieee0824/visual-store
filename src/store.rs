@@ -15,6 +15,9 @@ use std::{fs, io::Write, path::Path, time::Duration};
 use uuid::Uuid;
 
 const ENCODING: &str = "png-idat-zlib-v1";
+// Reserve space for the CLI success envelope and trailing newline so list stdout
+// stays within the documented 16 KiB budget.
+const LIST_DATA_BUDGET_BYTES: usize = 16 * 1024 - 64;
 fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
@@ -532,17 +535,43 @@ impl Store {
         };
         let mut stmt = self.conn.prepare("SELECT image_id,seq,run,label,width,height,created_at,(SELECT byte_length FROM blobs WHERE sha256=stored_blob_sha256) FROM images WHERE (?1 IS NULL OR run=?1) AND seq<=?2 AND seq<?3 ORDER BY seq DESC LIMIT ?4")?;
         let rows = stmt.query_map(params![run,c.max,c.last,limit+1],|r| Ok(json!({"ref":self.reference(&r.get::<_,String>(0)?),"seq":r.get::<_,i64>(1)?,"run":r.get::<_,Option<String>>(2)?,"label":r.get::<_,Option<String>>(3)?,"width":r.get::<_,u32>(4)?,"height":r.get::<_,u32>(5)?,"created_at":r.get::<_,String>(6)?,"stored_bytes":r.get::<_,u64>(7)?})))?;
-        let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-        let more = items.len() > limit as usize;
-        items.truncate(limit as usize);
-        let mut result = json!({"items":items});
-        if more {
-            let last = items.last().unwrap()["seq"].as_i64().unwrap();
-            result["next_cursor"] = URL_SAFE_NO_PAD
-                .encode(serde_json::to_vec(&Cursor { last, ..c })?)
-                .into();
+        let candidates = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let page = |items: &[Value], more: bool| -> Result<Value> {
+            let mut result = json!({"items":items});
+            if more {
+                let last = result["items"]
+                    .as_array()
+                    .and_then(|items| items.last())
+                    .and_then(|item| item["seq"].as_i64())
+                    .ok_or_else(|| integrity("List pagination produced an empty page."))?;
+                result["next_cursor"] = URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&Cursor {
+                        version: c.version,
+                        store: c.store,
+                        run: c.run.clone(),
+                        max: c.max,
+                        last,
+                    })?)
+                    .into();
+            }
+            Ok(result)
+        };
+        let mut items = Vec::with_capacity((limit as usize).min(candidates.len()));
+        for item in candidates.iter().take(limit as usize) {
+            items.push(item.clone());
+            let trial = page(&items, items.len() < candidates.len())?;
+            if serde_json::to_vec(&trial)?.len() > LIST_DATA_BUDGET_BYTES {
+                let _ = items.pop();
+                if items.is_empty() {
+                    return Err(Error::new(
+                        "E_LIMIT_EXCEEDED",
+                        "A list item exceeds the output byte budget.",
+                    ));
+                }
+                break;
+            }
         }
-        Ok(result)
+        page(&items, items.len() < candidates.len())
     }
     pub fn materialize(
         &self,

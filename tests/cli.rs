@@ -1,6 +1,53 @@
 mod common;
 use common::*;
 use serde_json::Value;
+use visual_store::{PutOptions, Store};
+
+const LIST_STDOUT_BUDGET_BYTES: usize = 16 * 1024;
+
+fn list_page(h: &Harness, run: &str, limit: u32, cursor: Option<&str>) -> (Value, usize) {
+    let mut command = h.command();
+    command
+        .arg("list")
+        .args(["--run", run, "--limit", &limit.to_string()]);
+    if let Some(cursor) = cursor {
+        command.args(["--cursor", cursor]);
+    }
+    let out = command.output().unwrap();
+    assert!(
+        out.status.success(),
+        "list failed: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        out.stdout.len() <= LIST_STDOUT_BUDGET_BYTES,
+        "list JSON is {} bytes",
+        out.stdout.len()
+    );
+    let bytes = out.stdout.len();
+    let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(envelope["ok"], true);
+    (envelope["data"].clone(), bytes)
+}
+
+fn collect_list(h: &Harness, run: &str, limit: u32) -> Vec<i64> {
+    let mut cursor = None;
+    let mut sequences = Vec::new();
+    loop {
+        let (page, _) = list_page(h, run, limit, cursor.as_deref());
+        sequences.extend(
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["seq"].as_i64().unwrap()),
+        );
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            return sequences;
+        }
+    }
+}
 
 #[test]
 fn stdout_obeys_json_schema_and_size_budgets() {
@@ -60,6 +107,66 @@ fn stdout_obeys_json_schema_and_size_budgets() {
         ],
         "E_LIMIT_EXCEEDED",
     );
+}
+
+#[test]
+fn list_budget_pages_twenty_hundred_and_escaped_metadata_without_loss() {
+    let h = Harness::new();
+    h.init();
+    let mut store = Store::open(&h.root, true).unwrap();
+    for i in 0..100 {
+        store
+            .put(
+                &h.input,
+                PutOptions {
+                    run: Some("short-metadata".into()),
+                    label: Some(format!("image-{i}")),
+                    ..PutOptions::default()
+                },
+            )
+            .unwrap();
+    }
+
+    let (default_page, default_bytes) = list_page(&h, "short-metadata", 20, None);
+    assert_eq!(default_page["items"].as_array().unwrap().len(), 20);
+    assert!(default_page.get("next_cursor").is_some());
+    assert!(default_bytes <= LIST_STDOUT_BUDGET_BYTES);
+
+    let (hundred_page, hundred_bytes) = list_page(&h, "short-metadata", 100, None);
+    assert!(hundred_page["items"].as_array().unwrap().len() < 100);
+    assert!(hundred_page.get("next_cursor").is_some());
+    assert!(hundred_bytes <= LIST_STDOUT_BUDGET_BYTES);
+    let short_sequences = collect_list(&h, "short-metadata", 100);
+    assert_eq!(short_sequences.len(), 100);
+    assert!(short_sequences.windows(2).all(|pair| pair[0] > pair[1]));
+
+    let escaped_run = "\u{1}".repeat(128);
+    let escaped_label = "\u{2}".repeat(256);
+    for _ in 0..20 {
+        store
+            .put(
+                &h.input,
+                PutOptions {
+                    run: Some(escaped_run.clone()),
+                    label: Some(escaped_label.clone()),
+                    ..PutOptions::default()
+                },
+            )
+            .unwrap();
+    }
+    drop(store);
+
+    let (escaped_page, escaped_bytes) = list_page(&h, &escaped_run, 20, None);
+    assert!(escaped_page["items"].as_array().unwrap().len() < 20);
+    assert!(escaped_page.get("next_cursor").is_some());
+    assert!(escaped_bytes <= LIST_STDOUT_BUDGET_BYTES);
+    for item in escaped_page["items"].as_array().unwrap() {
+        assert_eq!(item["run"], escaped_run);
+        assert_eq!(item["label"], escaped_label);
+    }
+    let escaped_sequences = collect_list(&h, &escaped_run, 20);
+    assert_eq!(escaped_sequences.len(), 20);
+    assert!(escaped_sequences.windows(2).all(|pair| pair[0] > pair[1]));
 }
 #[test]
 fn environment_store_selection_and_no_implicit_ancestor_search() {

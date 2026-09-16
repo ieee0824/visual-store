@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::VecDeque,
     ffi::CStr,
     fmt,
     os::raw::{c_int, c_ulong},
@@ -338,6 +339,7 @@ impl Encoder {
         width: u32,
         height: u32,
         pts: i64,
+        all_intra: bool,
     ) -> Result<Vec<Packet>> {
         let mut image = ffi::vpx_image_t::default();
         // SAFETY: `data` contains exactly three width*height planes and remains
@@ -357,7 +359,7 @@ impl Encoder {
         }
         image.cs = ffi::vpx_color_space::VPX_CS_SRGB;
         image.range = ffi::vpx_color_range::VPX_CR_FULL_RANGE;
-        let flags = if pts == 0 {
+        let flags = if pts == 0 || all_intra {
             ffi::VPX_EFLAG_FORCE_KF as ffi::vpx_enc_frame_flags_t
         } else {
             0
@@ -522,6 +524,170 @@ struct PlanarFrame {
     planes: [Vec<u8>; 3],
 }
 
+/// Stateful lossless encoder that accepts one packed image frame at a time.
+///
+/// The caller does not need to retain previously submitted sample buffers. libvpx
+/// keeps only the reference surfaces required by the configured codec context.
+pub struct SequenceEncoder {
+    width: u32,
+    height: u32,
+    layout: PixelLayout,
+    pixels: usize,
+    color: Encoder,
+    alpha: Option<Encoder>,
+    color_packets: Vec<Packet>,
+    alpha_packets: Option<Vec<Packet>>,
+    deadline: Option<Instant>,
+    all_intra: bool,
+    frame_count: usize,
+}
+
+impl SequenceEncoder {
+    /// Create a one-frame-at-a-time encoder with a finite wall-clock limit.
+    pub fn with_time_limit(
+        width: u32,
+        height: u32,
+        layout: PixelLayout,
+        limit: Duration,
+    ) -> Result<Self> {
+        let deadline = Instant::now()
+            .checked_add(limit)
+            .ok_or_else(CodecError::limit)?;
+        Self::new_internal(width, height, layout, Some(deadline), false)
+    }
+
+    fn new_internal(
+        width: u32,
+        height: u32,
+        layout: PixelLayout,
+        deadline: Option<Instant>,
+        all_intra: bool,
+    ) -> Result<Self> {
+        let pixels = checked_pixels(width, height)?;
+        let color = Encoder::new(width, height)?;
+        let alpha = if layout == PixelLayout::Rgba8 {
+            Some(Encoder::new(width, height)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            width,
+            height,
+            layout,
+            pixels,
+            color,
+            alpha,
+            color_packets: Vec::new(),
+            alpha_packets: (layout == PixelLayout::Rgba8).then(Vec::new),
+            deadline,
+            all_intra,
+            frame_count: 0,
+        })
+    }
+
+    fn check_deadline(&self) -> Result<()> {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            Err(CodecError::limit())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Submit one packed RGB or RGBA frame. The samples are consumed during this
+    /// call and can be released immediately after it returns.
+    pub fn push(&mut self, samples: &[u8]) -> Result<()> {
+        let expected = self
+            .pixels
+            .checked_mul(self.layout.channels())
+            .ok_or_else(|| CodecError::input("sample length overflow"))?;
+        if samples.len() != expected {
+            return Err(CodecError::input(format!(
+                "frame has {} samples; expected {expected}",
+                samples.len()
+            )));
+        }
+        #[cfg(feature = "fault-injection")]
+        if let Ok(milliseconds) = std::env::var("VSTORE_TEST_CODEC_DELAY_MS")
+            && let Ok(milliseconds) = milliseconds.parse::<u64>()
+        {
+            std::thread::sleep(Duration::from_millis(milliseconds));
+        }
+        self.check_deadline()?;
+        let frame = Frame {
+            width: self.width,
+            height: self.height,
+            layout: self.layout,
+            samples,
+        };
+        let pts = i64::try_from(self.frame_count)
+            .map_err(|_| CodecError::input("frame count exceeds codec timestamp range"))?;
+        let mut color = color_planes(frame, self.pixels);
+        self.color_packets.extend(self.color.encode(
+            &mut color,
+            self.width,
+            self.height,
+            pts,
+            self.all_intra,
+        )?);
+        self.check_deadline()?;
+        if let (Some(alpha_encoder), Some(alpha_packets)) =
+            (&mut self.alpha, &mut self.alpha_packets)
+        {
+            let mut alpha = alpha_planes(frame, self.pixels);
+            alpha_packets.extend(alpha_encoder.encode(
+                &mut alpha,
+                self.width,
+                self.height,
+                pts,
+                self.all_intra,
+            )?);
+        }
+        self.frame_count = self
+            .frame_count
+            .checked_add(1)
+            .ok_or_else(|| CodecError::input("frame count overflow"))?;
+        Ok(())
+    }
+
+    /// Flush and return the immutable encoded sequence.
+    pub fn finish(mut self) -> Result<EncodedSequence> {
+        if self.frame_count < 2 {
+            return Err(CodecError::input("at least two frames are required"));
+        }
+        self.check_deadline()?;
+        self.color_packets.extend(self.color.finish()?);
+        self.check_deadline()?;
+        if let (Some(alpha_encoder), Some(alpha_packets)) =
+            (&mut self.alpha, &mut self.alpha_packets)
+        {
+            alpha_packets.extend(alpha_encoder.finish()?);
+        }
+        self.check_deadline()?;
+        Ok(EncodedSequence {
+            descriptor: CodecDescriptor {
+                version: DESCRIPTOR_VERSION,
+                codec: "vp9".into(),
+                profile: VP9_PROFILE_I444_8_BIT,
+                bit_depth: 8,
+                pixel_layout: self.layout,
+                color_layout: COLOR_LAYOUT.into(),
+                alpha_layout: self.alpha_packets.as_ref().map(|_| ALPHA_LAYOUT.into()),
+                color_space: "srgb_full_range_no_conversion".into(),
+                lossless: true,
+                libvpx_version: libvpx_version(),
+            },
+            width: self.width,
+            height: self.height,
+            frame_count: self.frame_count,
+            color_packets: self.color_packets,
+            alpha_packets: self.alpha_packets,
+        })
+    }
+}
+
 fn check(
     operation: &'static str,
     status: ffi::vpx_codec_err_t,
@@ -534,6 +700,20 @@ fn check(
     }
 }
 
+fn checked_pixels(width: u32, height: u32) -> Result<usize> {
+    if width == 0 || height == 0 {
+        return Err(CodecError::input("frame dimensions must be positive"));
+    }
+    usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or_else(|| CodecError::input("frame dimensions overflow"))
+}
+
 fn validate_frames(frames: &[Frame<'_>]) -> Result<(u32, u32, PixelLayout, usize)> {
     let first = frames
         .first()
@@ -541,17 +721,7 @@ fn validate_frames(frames: &[Frame<'_>]) -> Result<(u32, u32, PixelLayout, usize
     if frames.len() < 2 {
         return Err(CodecError::input("at least two frames are required"));
     }
-    if first.width == 0 || first.height == 0 {
-        return Err(CodecError::input("frame dimensions must be positive"));
-    }
-    let pixels = usize::try_from(first.width)
-        .ok()
-        .and_then(|width| {
-            usize::try_from(first.height)
-                .ok()
-                .and_then(|height| width.checked_mul(height))
-        })
-        .ok_or_else(|| CodecError::input("frame dimensions overflow"))?;
+    let pixels = checked_pixels(first.width, first.height)?;
     for frame in frames {
         if frame.width != first.width
             || frame.height != first.height
@@ -593,37 +763,14 @@ fn alpha_planes(frame: Frame<'_>, pixels: usize) -> Vec<u8> {
     planes
 }
 
-fn encode_stream(
-    frames: &[Frame<'_>],
-    width: u32,
-    height: u32,
-    pixels: usize,
-    alpha: bool,
-    deadline: Option<Instant>,
-) -> Result<Vec<Packet>> {
-    let mut encoder = Encoder::new(width, height)?;
-    let mut packets = Vec::new();
-    for (index, frame) in frames.iter().copied().enumerate() {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(CodecError::limit());
-        }
-        let mut planes = if alpha {
-            alpha_planes(frame, pixels)
-        } else {
-            color_planes(frame, pixels)
-        };
-        packets.extend(encoder.encode(&mut planes, width, height, index as i64)?);
-    }
-    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        return Err(CodecError::limit());
-    }
-    packets.extend(encoder.finish()?);
-    Ok(packets)
-}
-
 /// Encode two or more frames with one lossless VP9 encoder per stored stream.
 pub fn encode(frames: &[Frame<'_>]) -> Result<EncodedSequence> {
-    encode_internal(frames, None)
+    encode_internal(frames, None, false)
+}
+
+/// Benchmark-only comparison that forces every input to begin an intra frame.
+pub fn encode_all_intra(frames: &[Frame<'_>]) -> Result<EncodedSequence> {
+    encode_internal(frames, None, true)
 }
 
 /// Encode with a finite wall-clock deadline checked between libvpx calls.
@@ -631,38 +778,20 @@ pub fn encode_with_time_limit(frames: &[Frame<'_>], limit: Duration) -> Result<E
     let deadline = Instant::now()
         .checked_add(limit)
         .ok_or_else(CodecError::limit)?;
-    encode_internal(frames, Some(deadline))
+    encode_internal(frames, Some(deadline), false)
 }
 
-fn encode_internal(frames: &[Frame<'_>], deadline: Option<Instant>) -> Result<EncodedSequence> {
-    let (width, height, layout, pixels) = validate_frames(frames)?;
-    let color_packets = encode_stream(frames, width, height, pixels, false, deadline)?;
-    let alpha_packets = if layout == PixelLayout::Rgba8 {
-        Some(encode_stream(
-            frames, width, height, pixels, true, deadline,
-        )?)
-    } else {
-        None
-    };
-    Ok(EncodedSequence {
-        descriptor: CodecDescriptor {
-            version: DESCRIPTOR_VERSION,
-            codec: "vp9".into(),
-            profile: VP9_PROFILE_I444_8_BIT,
-            bit_depth: 8,
-            pixel_layout: layout,
-            color_layout: COLOR_LAYOUT.into(),
-            alpha_layout: alpha_packets.as_ref().map(|_| ALPHA_LAYOUT.into()),
-            color_space: "srgb_full_range_no_conversion".into(),
-            lossless: true,
-            libvpx_version: libvpx_version(),
-        },
-        width,
-        height,
-        frame_count: frames.len(),
-        color_packets,
-        alpha_packets,
-    })
+fn encode_internal(
+    frames: &[Frame<'_>],
+    deadline: Option<Instant>,
+    all_intra: bool,
+) -> Result<EncodedSequence> {
+    let (width, height, layout, _) = validate_frames(frames)?;
+    let mut encoder = SequenceEncoder::new_internal(width, height, layout, deadline, all_intra)?;
+    for frame in frames {
+        encoder.push(frame.samples)?;
+    }
+    encoder.finish()
 }
 
 fn validate_descriptor(sequence: &EncodedSequence) -> Result<()> {
@@ -695,82 +824,87 @@ fn validate_descriptor(sequence: &EncodedSequence) -> Result<()> {
     }
 }
 
-fn decode_stream(
-    packets: &[Packet],
+struct StreamFrames<'a> {
+    decoder: Decoder,
+    packets: &'a [Packet],
+    packet_index: usize,
+    pending: VecDeque<PlanarFrame>,
+    flushed: bool,
     width: u32,
     height: u32,
-    display_frames: usize,
-) -> Result<Vec<PlanarFrame>> {
-    let mut decoder = Decoder::new(width, height)?;
-    let mut frames = Vec::new();
-    for packet in packets {
-        frames.extend(decoder.decode(&packet.data)?);
-        if frames.len() >= display_frames {
-            frames.truncate(display_frames);
-            return Ok(frames);
+}
+
+impl<'a> StreamFrames<'a> {
+    fn new(packets: &'a [Packet], width: u32, height: u32) -> Result<Self> {
+        Ok(Self {
+            decoder: Decoder::new(width, height)?,
+            packets,
+            packet_index: 0,
+            pending: VecDeque::new(),
+            flushed: false,
+            width,
+            height,
+        })
+    }
+
+    fn next_frame(&mut self) -> Result<Option<PlanarFrame>> {
+        loop {
+            if let Some(frame) = self.pending.pop_front() {
+                if (frame.width, frame.height) != (self.width, self.height) {
+                    return Err(CodecError::input(
+                        "decoded frame dimensions differ from the descriptor",
+                    ));
+                }
+                return Ok(Some(frame));
+            }
+            if let Some(packet) = self.packets.get(self.packet_index) {
+                self.packet_index += 1;
+                self.pending.extend(self.decoder.decode(&packet.data)?);
+                continue;
+            }
+            if !self.flushed {
+                self.flushed = true;
+                self.pending.extend(self.decoder.finish()?);
+                continue;
+            }
+            return Ok(None);
         }
     }
-    frames.extend(decoder.finish()?);
-    frames.truncate(display_frames);
-    if frames
-        .iter()
-        .any(|frame| frame.width != width || frame.height != height)
-    {
-        return Err(CodecError::input(
-            "decoded frame dimensions differ from the descriptor",
-        ));
-    }
-    Ok(frames)
 }
 
-/// Decode and reverse the internal plane mapping for every display frame.
-pub fn decode(sequence: &EncodedSequence) -> Result<Vec<DecodedFrame>> {
-    decode_prefix(sequence, sequence.frame_count)
-}
-
-/// Decode only the requested display-frame prefix of an independent sequence.
-pub fn decode_prefix(
+fn decode_frames(
     sequence: &EncodedSequence,
     display_frames: usize,
-) -> Result<Vec<DecodedFrame>> {
+    require_exact_count: bool,
+    mut visit: impl FnMut(usize, DecodedFrame) -> bool,
+) -> Result<()> {
     validate_descriptor(sequence)?;
     if display_frames == 0 || display_frames > sequence.frame_count {
         return Err(CodecError::input("display-frame prefix is out of bounds"));
     }
-    let colors = decode_stream(
-        &sequence.color_packets,
-        sequence.width,
-        sequence.height,
-        display_frames,
-    )?;
-    let alphas = sequence
-        .alpha_packets
-        .as_ref()
-        .map(|packets| decode_stream(packets, sequence.width, sequence.height, display_frames))
-        .transpose()?;
-    if colors.len() != display_frames
-        || alphas
-            .as_ref()
-            .is_some_and(|frames| frames.len() != display_frames)
-    {
-        return Err(CodecError::input(
-            "decoded display-frame count differs from the descriptor",
-        ));
-    }
-    let pixels = usize::try_from(sequence.width)
-        .ok()
-        .and_then(|width| {
-            usize::try_from(sequence.height)
-                .ok()
-                .and_then(|height| width.checked_mul(height))
-        })
-        .ok_or_else(|| CodecError::input("decoded frame dimensions overflow"))?;
+    let pixels = checked_pixels(sequence.width, sequence.height)?;
     let channels = sequence.descriptor.pixel_layout.channels();
-    let mut decoded = Vec::with_capacity(display_frames);
+    let mut colors = StreamFrames::new(&sequence.color_packets, sequence.width, sequence.height)?;
+    let mut alphas = sequence
+        .alpha_packets
+        .as_deref()
+        .map(|packets| StreamFrames::new(packets, sequence.width, sequence.height))
+        .transpose()?;
     for index in 0..display_frames {
-        let color = &colors[index];
-        let alpha = alphas.as_ref().map(|frames| &frames[index]);
-        if alpha.is_some_and(|alpha| {
+        let color = colors.next_frame()?.ok_or_else(|| {
+            CodecError::input("decoded display-frame count differs from the descriptor")
+        })?;
+        let alpha = alphas
+            .as_mut()
+            .map(StreamFrames::next_frame)
+            .transpose()?
+            .flatten();
+        if sequence.descriptor.pixel_layout == PixelLayout::Rgba8 && alpha.is_none() {
+            return Err(CodecError::input(
+                "decoded alpha-frame count differs from the descriptor",
+            ));
+        }
+        if alpha.as_ref().is_some_and(|alpha| {
             alpha.planes[1].iter().any(|&sample| sample != 0)
                 || alpha.planes[2].iter().any(|&sample| sample != 0)
         }) {
@@ -781,18 +915,85 @@ pub fn decode_prefix(
             samples.push(color.planes[0][pixel]);
             samples.push(color.planes[1][pixel]);
             samples.push(color.planes[2][pixel]);
-            if let Some(alpha) = alpha {
+            if let Some(alpha) = &alpha {
                 samples.push(alpha.planes[0][pixel]);
             }
         }
-        decoded.push(DecodedFrame {
-            width: sequence.width,
-            height: sequence.height,
-            layout: sequence.descriptor.pixel_layout,
-            samples,
-        });
+        if !visit(
+            index,
+            DecodedFrame {
+                width: sequence.width,
+                height: sequence.height,
+                layout: sequence.descriptor.pixel_layout,
+                samples,
+            },
+        ) {
+            return Err(CodecError::input(
+                "decoded frame was rejected by the caller",
+            ));
+        }
     }
+    if require_exact_count
+        && (colors.next_frame()?.is_some()
+            || alphas
+                .as_mut()
+                .map(StreamFrames::next_frame)
+                .transpose()?
+                .flatten()
+                .is_some())
+    {
+        return Err(CodecError::input(
+            "decoded display-frame count differs from the descriptor",
+        ));
+    }
+    Ok(())
+}
+
+/// Decode and reverse the internal plane mapping for every display frame.
+pub fn decode(sequence: &EncodedSequence) -> Result<Vec<DecodedFrame>> {
+    let mut decoded = Vec::with_capacity(sequence.frame_count);
+    decode_frames(sequence, sequence.frame_count, true, |_, frame| {
+        decoded.push(frame);
+        true
+    })?;
     Ok(decoded)
+}
+
+/// Decode only the requested display-frame prefix of an independent sequence.
+pub fn decode_prefix(
+    sequence: &EncodedSequence,
+    display_frames: usize,
+) -> Result<Vec<DecodedFrame>> {
+    let mut decoded = Vec::with_capacity(display_frames);
+    decode_frames(sequence, display_frames, false, |_, frame| {
+        decoded.push(frame);
+        true
+    })?;
+    Ok(decoded)
+}
+
+/// Decode through one indexed display frame while retaining only that output frame.
+pub fn decode_one(sequence: &EncodedSequence, frame_index: usize) -> Result<DecodedFrame> {
+    let display_frames = frame_index
+        .checked_add(1)
+        .ok_or_else(|| CodecError::input("display-frame index overflow"))?;
+    let mut selected = None;
+    decode_frames(sequence, display_frames, false, |index, frame| {
+        if index == frame_index {
+            selected = Some(frame);
+        }
+        true
+    })?;
+    selected.ok_or_else(|| CodecError::input("requested display frame was not decoded"))
+}
+
+/// Decode and visit a complete sequence one frame at a time without retaining the
+/// entire decoded segment. Returning false rejects the current frame.
+pub fn decode_each(
+    sequence: &EncodedSequence,
+    visit: impl FnMut(usize, DecodedFrame) -> bool,
+) -> Result<()> {
+    decode_frames(sequence, sequence.frame_count, true, visit)
 }
 
 /// Ask libvpx's VP9 decoder interface to parse packet header metadata.

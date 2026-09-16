@@ -124,6 +124,29 @@ impl Harness {
         assert_eq!(v["ok"], true);
         v["data"].clone()
     }
+    pub fn validated_call(&self, args: &[&str], budget: usize) -> Value {
+        let output = self.raw(args);
+        assert!(
+            output.status.success(),
+            "args {args:?}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.stdout.len() <= budget,
+            "args {args:?}: {} bytes",
+            output.stdout.len()
+        );
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let schema: Value =
+            serde_json::from_str(include_str!("../../docs/cli.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        if let Err(error) = validator.validate(&value) {
+            panic!("{args:?}: {error}: {value}");
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(!text.contains("data:image") && !text.contains("iVBORw0KGgo"));
+        value["data"].clone()
+    }
     pub fn error(&self, args: &[&str], code: &str) -> Value {
         let o = self.raw(args);
         assert!(
@@ -134,6 +157,17 @@ impl Harness {
         let v: Value = serde_json::from_slice(&o.stdout).unwrap();
         assert_eq!(v["error"]["code"], code, "{v}");
         v
+    }
+    pub fn error_with_env(&self, args: &[&str], key: &str, value: &str, code: &str) -> Value {
+        let o = self.command().args(args).env(key, value).output().unwrap();
+        assert!(
+            !o.status.success(),
+            "unexpected success: {}",
+            String::from_utf8_lossy(&o.stdout)
+        );
+        let result: Value = serde_json::from_slice(&o.stdout).unwrap();
+        assert_eq!(result["error"]["code"], code, "{result}");
+        result
     }
     pub fn init(&self) {
         self.call(&["init"]);

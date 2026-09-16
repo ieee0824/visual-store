@@ -56,11 +56,19 @@ vstore --store "$PWD/.visual-store" verify
 
 Every command except `--help` and `--version` emits one JSON value to stdout. Diagnostics do not contain image bytes. `get` returns an absolute local path and `displayed: false`; pass that path to an image viewer only when image content is needed.
 
+Temporal compression reduces local storage capacity. Reference-based retrieval keeps
+unneeded images out of the conversation; the Skill cannot remove an image that was
+already displayed from model history. Packed byte savings are not image-token savings.
+
 Store selection uses `--store PATH`, then `VSTORE_ROOT`, then `$CWD/.visual-store`. It never searches parent directories. Keep `.visual-store/` out of Git; this repository's `.gitignore` already excludes its local store.
 
 An observation with `--run` receives an immutable, zero-based `frame_no` within its `(run, stream)`; the stream defaults to `default`. Use `put --keep-source` when byte-for-byte retrieval of the input is required. Otherwise, only the validated lossless stored representation is retained. Use `--operation-id` for a retryable registration operation. Reusing an operation ID with different source bytes or metadata fails with `E_CONFLICT`.
 
-See [the CLI reference](docs/cli.md), [JSON Schema](docs/cli.schema.json), and [storage format](docs/storage-format.md) for the complete contract.
+See [the CLI reference](docs/cli.md), [JSON Schema v2](docs/cli.schema.json), and [storage format](docs/storage-format.md) for the complete contract. Consumers of the archived schema v1 must update for representation, pack, get-frame, and prune fields.
+
+The default build includes the VP9 backend through system libvpx directly. AV1 is
+not implemented: `pack --codec av1` returns `E_CODEC_UNAVAILABLE`. FFmpeg is not
+required.
 
 ## Codex skill
 

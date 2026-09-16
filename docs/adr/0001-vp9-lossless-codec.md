@@ -40,6 +40,13 @@ descriptor version 1は次を固定する。
 
 一つのstreamの全frameを同じencoder contextへ順に渡す。`VP9E_SET_LOSSLESS=1`、quantizer 0、lag 0、1 thread、timebase 1/30、keyframe最大間隔128を用い、先頭だけを明示的なkeyframeにする。テストはpacket flagだけに依存しない。decoder APIの`vpx_codec_peek_stream_info`で圧縮済みpacket headerがnon-keyであることを確認し、そのpacketが先行frame列と同じdecoder contextなら完全復号できる一方、新規decoderへ単独で渡すと復号できないことを要求する。これにより、設定値やpacket flagの自己申告だけでなく、実際に先行decoder stateを必要とするbitstreamであることを示す。
 
+Rust側の`SequenceEncoder`は一枚ずつsampleを受け取り、呼び出し完了後に入力
+bufferを保持しない。colorとalphaは同じframe順で二つのcontextへ逐次投入する。
+取得・全体検証もdecoder出力を一枚ずつ組み立て、全segment分の展開RGB/RGBAを
+同時保持しない。libvpx内部の参照面はallocator-levelのhard capを設定できないため、
+寸法、stream数、有限の参照面数、作業buffer、container、補助情報から保守的に
+事前拒否し、実際のpeak RSSをbenchmarkで記録する。
+
 ## ビルド方式
 
 配布物へlibvpxをvendorしない。`pkg-config`で見つかるsystem libvpxへ動的リンクする。macOSとLinuxの通常セットアップは次のとおり。
@@ -90,4 +97,6 @@ system libvpxのbinaryを再配布する場合は、そのbinaryに対応するl
 
 ## AV1
 
-AV1 backendはこの段階では公開しない。将来codec選択をCLIへ公開するとき、backendがない`av1`は明示的な`E_CODEC_UNAVAILABLE`として拒否し、VP9やPNGへ読み替えない。
+AV1 backendはこの段階では実装しない。CLIは将来の選択を曖昧にしないため
+`--codec av1`を構文上は受理するが、明示的な`E_CODEC_UNAVAILABLE`として拒否し、
+VP9やPNGへ読み替えない。help、CLI文書、テストもこの状態を公開する。

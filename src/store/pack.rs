@@ -1,12 +1,12 @@
 use super::{RetiredPngEncoding, Store, now};
 use crate::{
     Error, Result,
-    codec::vp9::{self, Frame, PixelLayout},
+    codec::vp9::{self, PixelLayout},
     error::{integrity, invalid},
     fault,
     image::{
         ImageMeta, Limits,
-        reconstruction::{self},
+        reconstruction::{self, ReconstructionMetadata},
     },
     segment::{self, SegmentLimits, StoredSegment},
     sha256,
@@ -131,7 +131,6 @@ impl Candidate {
 
 struct PreparedFrame {
     candidate: Candidate,
-    samples: Vec<u8>,
     reconstruction_hash: String,
     reconstruction_bytes: Vec<u8>,
 }
@@ -307,17 +306,66 @@ impl Store {
         options: &PackOptions,
     ) -> Result<PreparedSegment> {
         let started = Instant::now();
+        let first = candidates
+            .first()
+            .ok_or_else(|| invalid("A temporal segment requires at least two frames."))?;
+        let layout = if first.color_type == 2 {
+            PixelLayout::Rgb8
+        } else {
+            PixelLayout::Rgba8
+        };
+        let pixels = usize::try_from(first.width)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(first.height)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Pack dimensions overflow."))?;
+        let codec_streams = if layout == PixelLayout::Rgba8 { 2 } else { 1 };
+        let codec_surface_estimate = pixels
+            .checked_mul(3)
+            .and_then(|bytes| bytes.checked_mul(codec_streams))
+            .and_then(|bytes| bytes.checked_mul(12))
+            .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Pack memory estimate overflow."))?;
+        let frame_samples = pixels
+            .checked_mul(if layout == PixelLayout::Rgba8 { 4 } else { 3 })
+            .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Pack sample size overflow."))?;
+        let largest_png = candidates
+            .iter()
+            .map(|candidate| usize::try_from(candidate.png_bytes).unwrap_or(usize::MAX))
+            .max()
+            .unwrap_or(0);
+        let fixed_memory_estimate =
+            codec_surface_estimate
+                .checked_add(frame_samples.checked_mul(4).ok_or_else(|| {
+                    Error::new("E_LIMIT_EXCEEDED", "Pack memory estimate overflow.")
+                })?)
+                .and_then(|bytes| {
+                    largest_png
+                        .checked_mul(3)
+                        .and_then(|png| bytes.checked_add(png))
+                })
+                .and_then(|bytes| bytes.checked_add(32 * 1024 * 1024))
+                .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Pack memory estimate overflow."))?;
+        if fixed_memory_estimate > options.limits.memory_bytes {
+            return Err(Error::new(
+                "E_LIMIT_EXCEEDED",
+                "Temporal encoding exceeds the configured memory estimate.",
+            ));
+        }
+        let mut encoder = vp9::SequenceEncoder::with_time_limit(
+            first.width,
+            first.height,
+            layout,
+            Duration::from_secs(options.max_encode_seconds),
+        )
+        .map_err(codec_error)?;
         let mut frames = Vec::with_capacity(candidates.len());
         let mut png_sizes = HashMap::new();
         let mut reconstruction_sizes = HashMap::new();
-        let mut sample_bytes = 0usize;
         let mut reconstruction_bytes = 0usize;
-        let mut largest_png = 0usize;
         for candidate in candidates {
-            let png_length = usize::try_from(candidate.png_bytes).map_err(|_| {
-                Error::new("E_LIMIT_EXCEEDED", "PNG byte length exceeds this platform.")
-            })?;
-            largest_png = largest_png.max(png_length);
             let png = self.object_bytes(
                 &candidate.png_hash,
                 candidate.png_bytes,
@@ -332,9 +380,7 @@ impl Store {
             }
             let descriptor = extracted.metadata.to_bytes(&options.limits)?;
             let descriptor_hash = sha256(&descriptor);
-            sample_bytes = sample_bytes
-                .checked_add(extracted.samples.len())
-                .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Pack sample size overflow."))?;
+            encoder.push(&extracted.samples).map_err(codec_error)?;
             reconstruction_bytes = reconstruction_bytes
                 .checked_add(descriptor.len())
                 .ok_or_else(|| {
@@ -348,7 +394,6 @@ impl Store {
                 .or_insert(descriptor.len() as u64);
             frames.push(PreparedFrame {
                 candidate,
-                samples: extracted.samples,
                 reconstruction_hash: descriptor_hash,
                 reconstruction_bytes: descriptor,
             });
@@ -363,20 +408,12 @@ impl Store {
                 "Reconstruction metadata exceeds --max-reconstruction-bytes.",
             ));
         }
-        let memory_estimate = sample_bytes
-            .checked_mul(3)
-            .and_then(|bytes| {
-                largest_png
-                    .checked_mul(3)
-                    .and_then(|png| bytes.checked_add(png))
-            })
-            .and_then(|bytes| {
-                reconstruction_bytes
-                    .checked_mul(2)
-                    .and_then(|meta| bytes.checked_add(meta))
-            })
-            .and_then(|bytes| bytes.checked_add(32 * 1024 * 1024))
-            .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Pack memory estimate overflow."))?;
+        let memory_estimate =
+            fixed_memory_estimate
+                .checked_add(reconstruction_bytes.checked_mul(2).ok_or_else(|| {
+                    Error::new("E_LIMIT_EXCEEDED", "Pack memory estimate overflow.")
+                })?)
+                .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Pack memory estimate overflow."))?;
         if memory_estimate > options.limits.memory_bytes {
             return Err(Error::new(
                 "E_LIMIT_EXCEEDED",
@@ -384,25 +421,7 @@ impl Store {
             ));
         }
 
-        let layout = if frames[0].candidate.color_type == 2 {
-            PixelLayout::Rgb8
-        } else {
-            PixelLayout::Rgba8
-        };
-        let codec_frames = frames
-            .iter()
-            .map(|frame| Frame {
-                width: frame.candidate.width,
-                height: frame.candidate.height,
-                layout,
-                samples: &frame.samples,
-            })
-            .collect::<Vec<_>>();
-        let sequence = vp9::encode_with_time_limit(
-            &codec_frames,
-            Duration::from_secs(options.max_encode_seconds),
-        )
-        .map_err(codec_error)?;
+        let sequence = encoder.finish().map_err(codec_error)?;
         if started.elapsed() > Duration::from_secs(options.max_encode_seconds) {
             return Err(Error::new(
                 "E_LIMIT_EXCEEDED",
@@ -429,17 +448,33 @@ impl Store {
             .any(|packet| !packet.keyframe);
         let stored = StoredSegment::from_sequence(&sequence, &options.segment_limits())?;
         let persisted = stored.to_sequence(&options.segment_limits())?;
-        let decoded = vp9::decode(&persisted).map_err(codec_error)?;
-        if decoded.len() != frames.len()
-            || decoded
-                .iter()
-                .zip(&frames)
-                .any(|(decoded, original)| decoded.samples != original.samples)
-        {
-            return Err(integrity(
-                "Persisted VP9 segment failed sample verification.",
-            ));
+        let mut verification_error = None;
+        let decoded = vp9::decode_each(&persisted, |index, decoded| {
+            let Some(frame) = frames.get(index) else {
+                return false;
+            };
+            let result =
+                ReconstructionMetadata::from_bytes(&frame.reconstruction_bytes, &options.limits)
+                    .and_then(|metadata| {
+                        reconstruction::rebuild_png(
+                            &metadata,
+                            &decoded.samples,
+                            &frame.candidate.verification(),
+                            6,
+                            &options.limits,
+                        )
+                    });
+            if let Err(error) = result {
+                verification_error = Some(error);
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(error) = verification_error {
+            return Err(error);
         }
+        decoded.map_err(codec_error)?;
         let encode_millis = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
         if started.elapsed() > Duration::from_secs(options.max_encode_seconds) {
             return Err(Error::new(

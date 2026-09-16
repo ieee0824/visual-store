@@ -101,7 +101,23 @@ impl fmt::Display for CodecError {
 impl std::error::Error for CodecError {}
 pub type Result<T> = std::result::Result<T, CodecError>;
 
+pub struct SequenceEncoder;
+impl SequenceEncoder {
+    pub fn with_time_limit(_: u32, _: u32, _: PixelLayout, _: Duration) -> Result<Self> {
+        Err(CodecError::unavailable())
+    }
+    pub fn push(&mut self, _: &[u8]) -> Result<()> {
+        Err(CodecError::unavailable())
+    }
+    pub fn finish(self) -> Result<EncodedSequence> {
+        Err(CodecError::unavailable())
+    }
+}
+
 pub fn encode(_: &[Frame<'_>]) -> Result<EncodedSequence> {
+    Err(CodecError::unavailable())
+}
+pub fn encode_all_intra(_: &[Frame<'_>]) -> Result<EncodedSequence> {
     Err(CodecError::unavailable())
 }
 pub fn encode_with_time_limit(_: &[Frame<'_>], _: Duration) -> Result<EncodedSequence> {
@@ -111,6 +127,12 @@ pub fn decode(_: &EncodedSequence) -> Result<Vec<DecodedFrame>> {
     Err(CodecError::unavailable())
 }
 pub fn decode_prefix(_: &EncodedSequence, _: usize) -> Result<Vec<DecodedFrame>> {
+    Err(CodecError::unavailable())
+}
+pub fn decode_one(_: &EncodedSequence, _: usize) -> Result<DecodedFrame> {
+    Err(CodecError::unavailable())
+}
+pub fn decode_each(_: &EncodedSequence, _: impl FnMut(usize, DecodedFrame) -> bool) -> Result<()> {
     Err(CodecError::unavailable())
 }
 pub fn inspect_packet(_: &[u8]) -> Result<PacketInfo> {

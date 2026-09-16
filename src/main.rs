@@ -159,6 +159,7 @@ enum Variant {
 #[derive(Clone, Copy, ValueEnum)]
 enum Codec {
     Vp9,
+    Av1,
 }
 
 fn run(cli: Cli) -> Result<(Value, i32)> {
@@ -252,13 +253,36 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
         }
         Command::Verify { report } => {
             let d = store.verify(report.as_deref())?;
-            let code = if d["valid"] == false { 5 } else { 0 };
-            return Ok((d, code));
+            if d["valid"] == false {
+                let unavailable = d["issues"].as_array().is_some_and(|issues| {
+                    issues
+                        .iter()
+                        .filter(|issue| issue["code"] == "E_CODEC_UNAVAILABLE")
+                        .count() as u64
+                        == d["error_count"].as_u64().unwrap_or(u64::MAX)
+                });
+                let error = if unavailable {
+                    Error::new(
+                        "E_CODEC_UNAVAILABLE",
+                        "Temporal segments could not be fully verified because VP9 support is unavailable.",
+                    )
+                } else {
+                    Error::new(
+                        "E_INTEGRITY",
+                        "Store verification found integrity problems.",
+                    )
+                };
+                return Ok((
+                    json!({"report":d,"operation_error":error}),
+                    error.exit_code(),
+                ));
+            }
+            return Ok((d, 0));
         }
         Command::Pack {
             run,
             stream,
-            codec: _,
+            codec,
             segment_frames,
             dry_run,
             max_segment_bytes,
@@ -267,6 +291,12 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
             max_pack_images,
             max_encode_seconds,
         } => {
+            if matches!(codec, Codec::Av1) {
+                return Err(Error::new(
+                    "E_CODEC_UNAVAILABLE",
+                    "The AV1 backend is not implemented; use --codec vp9.",
+                ));
+            }
             let outcome = store.pack(PackOptions {
                 run,
                 stream,
@@ -335,6 +365,7 @@ fn main() {
             let data = data
                 .get("pack")
                 .or_else(|| data.get("prune"))
+                .or_else(|| data.get("report"))
                 .cloned()
                 .unwrap_or(data);
             emit(

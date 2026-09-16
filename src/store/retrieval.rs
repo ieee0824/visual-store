@@ -40,6 +40,53 @@ struct TemporalLocation {
     reconstruction_bytes: u64,
 }
 
+fn temporal_memory_estimate(
+    width: u32,
+    height: u32,
+    pixel_layout: &str,
+    color_bytes: u64,
+    alpha_bytes: Option<u64>,
+    reconstruction_bytes: u64,
+) -> Result<usize> {
+    let pixels = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Decode dimensions overflow."))?;
+    let (channels, codec_streams) = match pixel_layout {
+        "rgb8" => (3usize, 1usize),
+        "rgba8" => (4usize, 2usize),
+        _ => return Err(integrity("Temporal pixel layout is invalid.")),
+    };
+    let codec_surfaces = pixels
+        .checked_mul(3)
+        .and_then(|bytes| bytes.checked_mul(codec_streams))
+        .and_then(|bytes| bytes.checked_mul(12));
+    let frame_working_set = pixels
+        .checked_mul(channels)
+        .and_then(|bytes| bytes.checked_mul(4));
+    let container_copies = usize::try_from(color_bytes)
+        .ok()
+        .and_then(|color| {
+            usize::try_from(alpha_bytes.unwrap_or(0))
+                .ok()
+                .and_then(|alpha| color.checked_add(alpha))
+        })
+        .and_then(|bytes| bytes.checked_mul(2));
+    let reconstruction_copies = usize::try_from(reconstruction_bytes)
+        .ok()
+        .and_then(|bytes| bytes.checked_mul(2));
+    codec_surfaces
+        .and_then(|total| frame_working_set.and_then(|value| total.checked_add(value)))
+        .and_then(|total| container_copies.and_then(|value| total.checked_add(value)))
+        .and_then(|total| reconstruction_copies.and_then(|value| total.checked_add(value)))
+        .and_then(|total| total.checked_add(32 * 1024 * 1024))
+        .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Decode memory estimate overflow."))
+}
+
 impl Store {
     fn temporal_location(&self, image_id: &str) -> Result<TemporalLocation> {
         self.conn.query_row(
@@ -106,45 +153,16 @@ impl Store {
                 "Temporal frame location or dimensions are inconsistent.",
             ));
         }
-        let channels = if location.pixel_layout == "rgb8" {
-            3usize
-        } else if location.pixel_layout == "rgba8" {
-            4
-        } else {
-            return Err(integrity("Temporal pixel layout is invalid."));
-        };
-        let prefix = usize::try_from(location.frame_index)
-            .ok()
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Decode range overflow."))?;
-        let resident = usize::try_from(location.width)
-            .ok()
-            .and_then(|w| {
-                usize::try_from(location.height)
-                    .ok()
-                    .and_then(|h| w.checked_mul(h))
-            })
-            .and_then(|pixels| pixels.checked_mul(channels))
-            .and_then(|frame| frame.checked_mul(prefix))
-            .and_then(|samples| samples.checked_mul(8))
-            .and_then(|bytes| bytes.checked_add(32 * 1024 * 1024))
-            .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Decode memory estimate overflow."))?;
-        let total_resident = resident
-            .checked_add(usize::try_from(location.color_bytes).unwrap_or(usize::MAX))
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    location
-                        .alpha_bytes
-                        .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
-                        .unwrap_or(0),
-                )
-            })
-            .and_then(|bytes| {
-                bytes.checked_add(
-                    usize::try_from(location.reconstruction_bytes).unwrap_or(usize::MAX),
-                )
-            })
-            .ok_or_else(|| Error::new("E_LIMIT_EXCEEDED", "Decode memory estimate overflow."))?;
+        let frame_index = usize::try_from(location.frame_index)
+            .map_err(|_| Error::new("E_LIMIT_EXCEEDED", "Frame index overflow."))?;
+        let total_resident = temporal_memory_estimate(
+            location.width,
+            location.height,
+            &location.pixel_layout,
+            location.color_bytes,
+            location.alpha_bytes,
+            location.reconstruction_bytes,
+        )?;
         if total_resident > self.limits.memory_bytes {
             return Err(Error::new(
                 "E_LIMIT_EXCEEDED",
@@ -180,7 +198,7 @@ impl Store {
                 "Temporal segment descriptor disagrees with the index.",
             ));
         }
-        let decoded = vp9::decode_prefix(&sequence, prefix).map_err(|error| {
+        let frame = vp9::decode_one(&sequence, frame_index).map_err(|error| {
             if error.is_unavailable() {
                 Error::new(
                     "E_CODEC_UNAVAILABLE",
@@ -190,9 +208,6 @@ impl Store {
                 Error::new("E_CODEC_FAILURE", format!("VP9 decode failed: {error}"))
             }
         })?;
-        let frame = decoded
-            .last()
-            .ok_or_else(|| integrity("VP9 produced no requested frame."))?;
         let descriptor = self.object_bytes(
             &location.reconstruction_hash,
             location.reconstruction_bytes,
@@ -259,6 +274,25 @@ impl Store {
                 "Temporal codec descriptor exceeds the metadata limit.",
             ));
         }
+        let max_reconstruction_bytes: u64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(pr.descriptor_byte_length),0) FROM frame_locations fl JOIN png_reconstruction pr ON pr.image_id=fl.image_id WHERE fl.segment_id=?1",
+            [segment_id],
+            |row| row.get(0),
+        )?;
+        let total_resident = temporal_memory_estimate(
+            width,
+            height,
+            &pixel_layout,
+            color_bytes,
+            alpha_bytes,
+            max_reconstruction_bytes,
+        )?;
+        if total_resident > self.limits.memory_bytes {
+            return Err(Error::new(
+                "E_LIMIT_EXCEEDED",
+                "Temporal verification exceeds the memory limit.",
+            ));
+        }
         let color = self.object_bytes(
             &color_hash,
             color_bytes,
@@ -290,16 +324,6 @@ impl Store {
                 "Temporal segment descriptor disagrees with its row.",
             ));
         }
-        let decoded = vp9::decode(&sequence).map_err(|error| {
-            if error.is_unavailable() {
-                Error::new(
-                    "E_CODEC_UNAVAILABLE",
-                    "VP9 segment is unverified because codec support is unavailable.",
-                )
-            } else {
-                integrity("VP9 segment failed decoding.")
-            }
-        })?;
         let mut statement = self.conn.prepare(
             "SELECT i.image_id,fl.frame_index,fl.decode_start_index,i.width,i.height,i.bit_depth,i.color_type,i.scanline_sha256,i.non_idat_sha256,i.pixel_sha256,pr.descriptor_blob_sha256,pr.descriptor_byte_length FROM frame_locations fl JOIN images i ON i.image_id=fl.image_id JOIN representations r ON r.image_id=i.image_id AND r.segment_id=fl.segment_id AND r.representation_kind='vp9_segment' JOIN png_reconstruction pr ON pr.image_id=i.image_id WHERE fl.segment_id=?1 ORDER BY fl.frame_index"
         )?;
@@ -324,9 +348,10 @@ impl Store {
         if rows.len() != frame_count as usize {
             return Err(integrity("Temporal segment mapping count differs."));
         }
-        for (
-            expected_index,
-            (
+        let mut rows = rows.into_iter();
+        let mut verification_error = None;
+        let decoded = vp9::decode_each(&sequence, |expected_index, decoded| {
+            let Some((
                 _id,
                 frame_index,
                 decode_start,
@@ -339,38 +364,64 @@ impl Store {
                 pixel_hash,
                 reconstruction_hash,
                 reconstruction_bytes,
-            ),
-        ) in rows.into_iter().enumerate()
-        {
-            if frame_index as usize != expected_index
-                || decode_start > frame_index
-                || decode_start != 0
-                || (image_width, image_height) != (width, height)
-            {
-                return Err(integrity("Temporal segment frame mapping is invalid."));
+            )) = rows.next()
+            else {
+                return false;
+            };
+            let result = (|| -> Result<()> {
+                if frame_index as usize != expected_index
+                    || decode_start > frame_index
+                    || decode_start != 0
+                    || (image_width, image_height) != (width, height)
+                {
+                    return Err(integrity("Temporal segment frame mapping is invalid."));
+                }
+                let descriptor = self.object_bytes(
+                    &reconstruction_hash,
+                    reconstruction_bytes,
+                    reconstruction::FILE_EXTENSION,
+                    self.limits.memory_bytes,
+                )?;
+                let metadata = ReconstructionMetadata::from_bytes(&descriptor, &self.limits)?;
+                reconstruction::rebuild_png(
+                    &metadata,
+                    &decoded.samples,
+                    &ImageMeta {
+                        width: image_width,
+                        height: image_height,
+                        bit_depth,
+                        color_type,
+                        scanline_sha256: scanline_hash,
+                        non_idat_sha256: non_idat_hash,
+                        pixel_sha256: pixel_hash,
+                    },
+                    6,
+                    &self.limits,
+                )?;
+                Ok(())
+            })();
+            if let Err(error) = result {
+                verification_error = Some(error);
+                false
+            } else {
+                true
             }
-            let descriptor = self.object_bytes(
-                &reconstruction_hash,
-                reconstruction_bytes,
-                reconstruction::FILE_EXTENSION,
-                self.limits.memory_bytes,
-            )?;
-            let metadata = ReconstructionMetadata::from_bytes(&descriptor, &self.limits)?;
-            reconstruction::rebuild_png(
-                &metadata,
-                &decoded[expected_index].samples,
-                &ImageMeta {
-                    width: image_width,
-                    height: image_height,
-                    bit_depth,
-                    color_type,
-                    scanline_sha256: scanline_hash,
-                    non_idat_sha256: non_idat_hash,
-                    pixel_sha256: pixel_hash,
-                },
-                6,
-                &self.limits,
-            )?;
+        });
+        if let Some(error) = verification_error {
+            return Err(error);
+        }
+        decoded.map_err(|error| {
+            if error.is_unavailable() {
+                Error::new(
+                    "E_CODEC_UNAVAILABLE",
+                    "VP9 segment is unverified because codec support is unavailable.",
+                )
+            } else {
+                integrity("VP9 segment failed decoding.")
+            }
+        })?;
+        if rows.next().is_some() {
+            return Err(integrity("Temporal segment mapping count differs."));
         }
         Ok(())
     }

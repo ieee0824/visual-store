@@ -52,6 +52,39 @@ jobs:
       - name: Build no-command codec probe
         run: cargo build --locked --example vp9_roundtrip
 
+      - name: Prove temporal capacity benchmark
+        run: |
+          cargo build --locked --release --example temporal_benchmark
+          VSTORE_BENCH_PREPRUNE_COPY="$RUNNER_TEMP/packed-store" PATH= ./target/release/examples/temporal_benchmark "$RUNNER_TEMP/temporal-benchmark.json"
+
+      - name: Exercise codec-free CLI behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --no-default-features --target-dir "$RUNNER_TEMP/codec-free-target"
+          codec_free="$RUNNER_TEMP/codec-free-target/debug/vstore"
+          fixture="$RUNNER_TEMP/v1-store"
+          cp -R tests/fixtures/v1-store "$fixture"
+          ref='visual://c3829740-9e12-4f8a-b723-f69b76a29a05/images/c3d40628-ebe0-4e4e-b768-ac1e2a6279fa'
+          "$codec_free" --store "$fixture" info "$ref"
+          "$codec_free" --store "$fixture" get "$ref" --output "$RUNNER_TEMP/codec-free-png.png"
+          "$codec_free" --store "$fixture" get "$ref" --variant source --output "$RUNNER_TEMP/codec-free-source.png"
+          "$codec_free" --store "$fixture" verify
+          set +e
+          "$codec_free" --store "$RUNNER_TEMP/packed-store" get-frame --run benchmark --stream screen --frame 17 > "$RUNNER_TEMP/codec-free-get.json"
+          get_status=$?
+          "$codec_free" --store "$RUNNER_TEMP/packed-store" verify > "$RUNNER_TEMP/codec-free-verify.json"
+          verify_status=$?
+          "$codec_free" --store "$RUNNER_TEMP/packed-store" prune --dry-run > "$RUNNER_TEMP/codec-free-prune.json"
+          prune_status=$?
+          set -e
+          test "$get_status" -eq 3
+          test "$verify_status" -eq 3
+          test "$prune_status" -eq 3
+          grep -q 'E_CODEC_UNAVAILABLE' "$RUNNER_TEMP/codec-free-get.json"
+          grep -q 'E_CODEC_UNAVAILABLE' "$RUNNER_TEMP/codec-free-verify.json"
+          grep -q 'E_CODEC_UNAVAILABLE' "$RUNNER_TEMP/codec-free-prune.json"
+
       - name: Prove codec works with an empty PATH
         run: PATH= ./target/debug/examples/vp9_roundtrip
 

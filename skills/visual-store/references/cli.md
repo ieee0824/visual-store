@@ -16,13 +16,18 @@ vstore [--store PATH] COMMAND
 | `info REF` | 寸法、メモ、タグ、ハッシュ、保存量、圧縮情報。完全性検査ではない |
 | `list [--run RUN] [--limit N] [--cursor CURSOR]` | 新しい登録順。既定20件、最大100件。stdoutは最大16 KiBで、byte上限時は指定件数未満でもcursorを返す。次ページも同じrun条件を使う |
 | `get REF [--variant stored\|source] [--output PATH]` | PNGをコピーして絶対pathを返す。既定はexports配下。画像表示は行わない |
-| `verify [--report NEW_FILE]` | 整合性検査。要約と最大20件の問題例。全問題はreportへ書く |
+| `get-frame --run RUN [--stream default] --frame N [--variant stored\|source] [--output PATH]` | frame索引から一枚だけPNGへ復元。segmentと復号範囲を返す |
+| `pack --run RUN [--stream STREAM] [--codec vp9] [--segment-frames 2..128] [--dry-run]` | 完了した列を検証済み不変segmentへ圧縮。不利ならPNGを維持。AV1は未実装で明示エラー |
+| `prune --dry-run\|--apply` | 検証済みretired PNGだけを明示整理。保存やpackの副作用では実行しない |
+| `verify [--report NEW_FILE]` | PNGと共有segmentの整合性検査。要約と最大20件の問題例。全問題はreportへ書く |
 | `migrate --to 2 [--resume\|--restore]` | v1 storeを明示移行。中断は再開またはv1へ復元 |
 
 REFは`visual://STORE_UUID/images/IMAGE_UUID`または選択store内のIMAGE_UUID。
 getとreportは出力先が既存ファイル・symlinkなら上書きせず失敗する。
 sourceは登録時に`--keep-source`を付けた場合のみ取得できる。
 streamはrunがある場合のみ指定でき、runあり・stream省略時は`default`。`(run, stream)`ごとに0始まりの`frame_no`を割り当てる。明示した空streamは拒否する。
+get/get-frameはactive表現がPNGでもVP9でも検証済みPNGを返し、常に`displayed:false`。動画復号不能なbuildは`E_CODEC_UNAVAILABLE`を返す。
+infoの`shared_representation_bytes`は複数画像で共有され得るため、画像ごとに合計しない。
 
 ## 再試行
 
@@ -48,11 +53,12 @@ runとstreamは各128、label 256、note 2048 UTF-8 bytes、タグ16件・各64 
 | 終了コード | 主なcode |
 | --- | --- |
 | 2 | `E_INVALID_ARGUMENT`, `E_INVALID_IMAGE`, `E_LIMIT_EXCEEDED`, `E_INVALID_CURSOR` |
-| 3 | `E_NOT_FOUND`, `E_STORE_NOT_INITIALIZED`, `E_UNSUPPORTED_IMAGE`, `E_UNSUPPORTED_METADATA`, `E_SOURCE_NOT_RETAINED` |
+| 3 | `E_NOT_FOUND`, `E_STORE_NOT_INITIALIZED`, `E_UNSUPPORTED_IMAGE`, `E_UNSUPPORTED_METADATA`, `E_SOURCE_NOT_RETAINED`, `E_CODEC_UNAVAILABLE` |
 | 4 | `E_CONFLICT`, `E_BUSY`, `E_OUTPUT_EXISTS`, `E_SOURCE_CHANGED`, `E_MIGRATION_INCOMPLETE` |
 | 5 | `E_INTEGRITY`, `E_SCHEMA_VERSION`, `E_STORE_MISMATCH` |
 | 6 | `E_IO`, `E_PERMISSION`, `E_DISK_FULL` |
 
 `E_BUSY`・`E_SOURCE_CHANGED`のみ`retryable:true`。無限再試行しない。
 verifyで整合性問題を検出した場合は終了5、`ok:false`、errorに加えてdataに検査結果を返す。
+pack/pruneの途中失敗も非ゼロ終了と、完了済み範囲を含むdataを返す。
 未参照ファイルは`unreferenced_candidate`として報告するだけで、これだけなら終了0。検査中の登録かもしれないため削除しない。

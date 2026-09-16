@@ -56,11 +56,15 @@ vstore --store "$PWD/.visual-store" verify
 
 `--help`と`--version`以外のコマンドは、標準出力へUTF-8のJSONを一件だけ出力します。診断結果に画像本体は含まれません。`get`は絶対ローカルパスと`displayed: false`を返します。画像の内容を確認する必要がある場合だけ、そのパスを画像表示機能へ渡してください。
 
+動画圧縮はローカル保存容量を削減します。参照IDで必要な画像だけ扱う設計は、不要な画像を会話へ入れないためのものです。一度モデルへ表示した画像をSkillが後から履歴から消すわけではなく、pack後のbyte削減は画像トークン削減量を表しません。
+
 storeの選択順は`--store PATH`、`VSTORE_ROOT`、`$CWD/.visual-store`です。親ディレクトリは探索しません。`.visual-store/`をGit管理に含めないでください。このリポジトリの`.gitignore`では除外済みです。
 
 `--run`を指定した観測には、`(run, stream)`ごとに0始まりの不変な`frame_no`が割り当てられます。`--stream`省略時は`default`です。入力と完全に同じバイト列を後で取得する必要がある場合は、`put --keep-source`を指定します。通常は検証済みの可逆保存版だけを保持します。再試行可能な登録には`--operation-id`を使います。同じ操作IDを異なる元画像やメタデータで再利用すると`E_CONFLICT`になります。
 
-完全な仕様は[CLIリファレンス](docs/cli.md)、[JSON Schema](docs/cli.schema.json)、[保存形式](docs/storage-format.md)を参照してください。
+完全な仕様は[CLIリファレンス](docs/cli.md)、[JSON Schema v2](docs/cli.schema.json)、[保存形式](docs/storage-format.md)を参照してください。旧schema v1のconsumerはv2のrepresentation、pack、get-frame、prune契約へ更新が必要です。
+
+既定buildはsystem libvpxを直接使うVP9 backendを含みます。AV1は未実装で、`pack --codec av1`は`E_CODEC_UNAVAILABLE`を返します。FFmpegは不要です。
 
 ## Codex Skill
 

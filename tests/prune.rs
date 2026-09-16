@@ -57,7 +57,7 @@ fn dry_run_apply_capacity_and_restart_retrieval_are_exact() {
     ).unwrap();
     drop(db);
 
-    let dry = h.call(&["prune", "--dry-run"]);
+    let dry = h.validated_call(&["prune", "--dry-run"], 16 * 1024);
     assert_eq!(dry["retired_candidate_bytes"], retired_bytes);
     assert_eq!(dry["reclaimable_bytes"], retired_bytes);
     assert_eq!(dry["reclaimed_bytes"], 0);

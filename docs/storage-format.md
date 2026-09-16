@@ -48,6 +48,12 @@ the old PNG representation, and activates the new representation. A crash before
 commit can leave only complete unreferenced candidates; a crash after commit leaves
 the entire segment active. Retired PNG objects are not deleted by pack.
 
+Pack retains candidate metadata but expands, validates, and submits only one PNG frame
+at a time to two stateful libvpx contexts at most (color plus alpha). Full persisted
+verification decodes and reconstructs one display frame at a time. Codec reference
+surfaces remain native allocations; the conservative memory estimate accounts for
+them but is not a hard allocator cap.
+
 Retrieval resolves `frame_locations` by image identity (or the indexed
 `images_by_stream_frame` key), loads only the named segment, and decodes its prefix
 from `decode_start_index` through `frame_index`. Reconstruction must pass all stored

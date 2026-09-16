@@ -1,5 +1,5 @@
 use visual_store::codec::vp9::{
-    CodecDescriptor, Frame, PixelLayout, decode, encode, inspect_packet,
+    CodecDescriptor, Frame, PixelLayout, decode, encode, encode_all_intra, inspect_packet,
 };
 
 fn rgb_frames(width: u32, height: u32, count: usize) -> Vec<Vec<u8>> {
@@ -83,6 +83,46 @@ fn vp9_lossless_round_trip_uses_inter_frames() {
     assert!(
         decode(&isolated_inter_packet).is_err(),
         "non-key packet decoded without the preceding reference-frame state"
+    );
+}
+
+#[test]
+fn all_intra_benchmark_control_has_only_keyframes_and_is_larger() {
+    let samples = rgb_frames(64, 48, 12);
+    let frames = samples
+        .iter()
+        .map(|samples| Frame {
+            width: 64,
+            height: 48,
+            layout: PixelLayout::Rgb8,
+            samples,
+        })
+        .collect::<Vec<_>>();
+    let temporal = encode(&frames).unwrap();
+    let all_intra = encode_all_intra(&frames).unwrap();
+    assert!(
+        all_intra
+            .color_packets
+            .iter()
+            .all(|packet| inspect_packet(&packet.data).unwrap().keyframe)
+    );
+    assert!(
+        temporal
+            .color_packets
+            .iter()
+            .any(|packet| !inspect_packet(&packet.data).unwrap().keyframe)
+    );
+    assert!(
+        all_intra.payload_byte_lengths().unwrap().total
+            > temporal.payload_byte_lengths().unwrap().total
+    );
+    assert_eq!(
+        decode(&all_intra)
+            .unwrap()
+            .iter()
+            .map(|frame| &frame.samples)
+            .collect::<Vec<_>>(),
+        samples.iter().collect::<Vec<_>>()
     );
 }
 

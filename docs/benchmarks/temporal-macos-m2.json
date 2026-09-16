@@ -1,0 +1,72 @@
+{
+  "capacity": {
+    "a_input_png_bytes": 22135456,
+    "b_distinct_repacked_png_bytes": 89272,
+    "c_codec_descriptor_and_container_total_before_index": 10078,
+    "c_complete_temporal_bytes": 30558,
+    "c_index_increment_bytes": 20480,
+    "c_reconstruction_distinct_bytes": 409,
+    "c_smaller_than_b": true,
+    "c_smaller_than_d": true,
+    "c_vp9_alpha_container_bytes": 0,
+    "c_vp9_color_container_bytes": 9378,
+    "d_all_intra_alpha_container_bytes": 0,
+    "d_all_intra_color_container_bytes": 41678,
+    "d_complete_all_intra_bytes": 62858
+  },
+  "environment": {
+    "arch": "aarch64",
+    "build": "release",
+    "cache": "3 warmups then 20 warm-cache retrievals",
+    "codec": "vp9",
+    "commit": "28b1c52",
+    "compression_level": 6,
+    "concurrency": 1,
+    "cpu": "Apple M2 (8 cores)",
+    "libvpx": "v1.16.0",
+    "os": "macos",
+    "os_version": "macOS 26.5.1 (25F80)",
+    "rust": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "segment_frames": 32,
+    "threads": 1
+  },
+  "fixture": {
+    "frames": 32,
+    "height": 360,
+    "name": "deterministic-changing-ui-v1",
+    "pixel_layout": "rgb8",
+    "width": 640
+  },
+  "pack": {
+    "candidate_bytes": 10078,
+    "encode_millis": 745,
+    "images_packed": 32,
+    "png_distinct_bytes": 89272,
+    "segments_packed": 1
+  },
+  "peak_rss_bytes": 105136128,
+  "prune": {
+    "allocated_object_bytes_after": 16384,
+    "allocated_object_bytes_before": 147456,
+    "dry_run_reclaimable_bytes": 89272,
+    "physical_object_bytes_after": 9787,
+    "physical_object_bytes_before": 99059,
+    "pruned_objects": 32,
+    "reclaimed_bytes": 89272
+  },
+  "retrieval": {
+    "decoded_from_frame": 0,
+    "decoded_through_frame": 17,
+    "frame_index": 17,
+    "frame_no": 17,
+    "median_micros": 25676,
+    "p95_micros": 30729,
+    "segment_id": "5daedd0d63540bc83bda9c270575592f3dc70780c6abed1c6bd968a0c8309cff"
+  },
+  "schema_version": 1,
+  "verify": {
+    "images_checked": 32,
+    "segments_checked": 1,
+    "valid": true
+  }
+}

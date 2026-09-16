@@ -22,6 +22,16 @@ Failures set a nonzero exit status and use:
 
 `verify` includes its bounded report under `data` when integrity problems are found. `pack` likewise includes a compact partial report under `data` if codec or persistence work fails. The machine-readable contract is [cli.schema.json](cli.schema.json). The previous response contract remains archived as [cli.schema.v1.json](cli.schema.v1.json); clients must select the schema by the envelope's `schema_version`.
 
+Successful and failed envelopes share these maximum stdout budgets, including JSON
+escaping and the trailing newline:
+
+| Commands | Maximum |
+| --- | ---: |
+| `init`, `put`, `info`, `get`, `get-frame`, `migrate` | 8 KiB |
+| `list`, `pack`, `prune`, `verify` | 16 KiB |
+
+No command writes PNG, VP9, reconstruction objects, Base64, or data URLs to stdout.
+
 ## Commands
 
 ### init
@@ -76,11 +86,11 @@ content is never substituted and unrelated segments are not scanned.
 
 Runs SQLite integrity and foreign-key checks, validates the manifest/store ID, verifies every indexed typed object's path, size, and SHA-256, and enumerates fixed-depth object paths without following symlinks. Each shared segment is decoded once; color/alpha containers, mappings, reconstructed dimensions, pixels, scanlines, non-IDAT metadata, and final PNG validity are checked.
 
-The stdout report contains counts and at most 20 examples. `--report NEW_FILE` writes every issue to a newly created JSON file. Integrity errors produce exit status 5. Files not referenced by the database are reported as `unreferenced_candidate`; they are not deleted or treated as corruption on that fact alone.
+The stdout report contains counts and at most 20 examples. `--report NEW_FILE` writes every issue to a newly created JSON file. Integrity errors produce exit status 5. When every unverifiable item is solely due to a codec-free build, the command instead returns `E_CODEC_UNAVAILABLE` and status 3; it does not call those segments corrupt. Files not referenced by the database are reported as `unreferenced_candidate`; they are not deleted or treated as corruption on that fact alone.
 
 ### pack
 
-Required: `--run RUN`. Optional: `--stream STREAM`, `--codec vp9`,
+Required: `--run RUN`. Optional: `--stream STREAM`, `--codec vp9|av1`,
 `--segment-frames 2..128` (default 32), and `--dry-run`. Finite safety bounds are
 `--max-segment-bytes`, `--max-segment-packets`, `--max-reconstruction-bytes`,
 `--max-pack-images`, and `--max-encode-seconds`.
@@ -94,6 +104,10 @@ than the distinct active PNG objects they replace. Otherwise PNG remains active 
 the report says `not_beneficial`. Published segments are immutable and begin with a
 keyframe; retired PNGs remain available. Re-running pack never renumbers frames or
 repacks finalized segments.
+
+VP9 is the only implemented backend. `--codec av1` is accepted as an explicit
+selection but returns `E_CODEC_UNAVAILABLE`; it is never relabeled as VP9 and never
+falls back to PNG silently.
 
 ### prune
 
@@ -131,7 +145,15 @@ Migration first creates and validates an on-store SQLite backup, then records a 
 | `--max-inflated-bytes` | 134,217,728 |
 | `--max-memory-bytes` | 268,435,456 |
 
-All values must be positive and finite. The memory bound is enforced with a conservative pre-allocation estimate covering input/candidate container copies, filtered scanlines, decoded samples, and headroom. Increasing limits is an explicit caller decision. The same increased bounds may be needed for a later `verify`.
+All values must be positive and finite. Pack reads, validates, and submits one expanded
+frame at a time; get and verify also consume decoded frames incrementally instead of
+retaining a whole segment of expanded RGB/RGBA samples. The memory bound uses a
+conservative pre-allocation estimate covering codec reference surfaces, the current
+input/output frame, candidate containers, reconstruction metadata, and headroom.
+libvpx's internal allocator cannot be given a strict byte cap, so the configured limit
+is a rejection estimate rather than an allocator-level guarantee; peak RSS is measured
+by the benchmark. Increasing limits is an explicit caller decision. The same increased
+bounds may be needed for a later `verify`.
 
 Metadata limits are run and stream 128 bytes each, label 256 bytes, note 2,048 bytes, and at most 16 nonempty tags of 64 bytes each. Operation IDs are 1 through 128 bytes. Escaped metadata is also capped to preserve the 8 KiB `info` response budget.
 

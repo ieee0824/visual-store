@@ -49,10 +49,10 @@ Apple M2 MacBook Air (8 cores, 24 GB), macOS 26.5.1 (25F80), Rust 1.95.0, libvpx
 | B: distinct repacked PNG objects | 89,272 bytes |
 | C: complete inter-frame VP9 + reconstruction + index | 30,558 bytes |
 | D: complete all-intra VP9 + reconstruction + index | 62,858 bytes |
-| Pack encode and full verification | 652 ms |
-| Warm frame-17 retrieval median / p95 | 24.611 / 29.369 ms |
+| Pack encode and full verification | 745 ms |
+| Warm frame-17 retrieval median / p95 | 25.676 / 30.729 ms |
 | Required decode range | frame 0 through 17 in one segment |
-| Process peak RSS | 105,398,272 bytes |
+| Process peak RSS | 105,136,128 bytes |
 | Object file lengths before / after prune | 99,059 / 9,787 bytes |
 | Allocated object blocks before / after prune | 147,456 / 16,384 bytes |
 | Reported and observed reclaimed file length | 89,272 bytes |

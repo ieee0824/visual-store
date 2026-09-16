@@ -64,10 +64,10 @@ segment size 32, compression level 6, concurrency 1. The committed JSON record i
 | C SQLite index increment | 20,480 bytes |
 | C complete temporal representation | 30,558 bytes |
 | D complete all-intra representation | 62,858 bytes |
-| Pack encode and verify | 652 ms |
-| Random frame 17, warm median / p95 | 24.611 / 29.369 ms |
+| Pack encode and verify | 745 ms |
+| Random frame 17, warm median / p95 | 25.676 / 30.729 ms |
 | Decoded range | frame 0 through 17 of one segment |
-| Process peak RSS | 105,398,272 bytes |
+| Process peak RSS | 105,136,128 bytes |
 | Object bytes before / after prune | 99,059 / 9,787 bytes |
 | Allocated object blocks before / after prune | 147,456 / 16,384 bytes |
 | Reported and observed reclaimed bytes | 89,272 bytes |

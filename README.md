@@ -50,6 +50,8 @@ vstore --store "$PWD/.visual-store" prune --dry-run
 # isolated storeでレポートを確認してから明示実行
 vstore --store "$PWD/.visual-store" prune --apply
 vstore --store "$PWD/.visual-store" info 'visual://STORE_ID/images/IMAGE_ID'
+vstore --store "$PWD/.visual-store" features 'visual://STORE_ID/images/IMAGE_ID'
+vstore --store "$PWD/.visual-store" judgment list 'visual://STORE_ID/images/IMAGE_ID'
 vstore --store "$PWD/.visual-store" get 'visual://STORE_ID/images/IMAGE_ID'
 vstore --store "$PWD/.visual-store" verify
 ```
@@ -61,6 +63,23 @@ vstore --store "$PWD/.visual-store" verify
 storeの選択順は`--store PATH`、`VSTORE_ROOT`、`$CWD/.visual-store`です。親ディレクトリは探索しません。`.visual-store/`をGit管理に含めないでください。このリポジトリの`.gitignore`では除外済みです。
 
 `--run`を指定した観測には、`(run, stream)`ごとに0始まりの不変な`frame_no`が割り当てられます。`--stream`省略時は`default`です。入力と完全に同じバイト列を後で取得する必要がある場合は、`put --keep-source`を指定します。通常は検証済みの可逆保存版だけを保持します。再試行可能な登録には`--operation-id`を使います。同じ操作IDを異なる元画像やメタデータで再利用すると`E_CONFLICT`になります。
+
+## Judgment Layer
+
+format version 3では、画像ごとに複数の外部判定を追加できます。`producer`、`model`、producer側の`schema_version`、JSON `value`、`probability`、`confidence`、metadata、時刻を独立して保持します。`rule`、`classical`、`jev`、`vision-llm`、`human`を同じ仕組みで扱えます。
+
+```bash
+vstore judgment add 'visual://STORE/images/IMAGE' \
+  --kind needs_visual_inspection \
+  --producer jev \
+  --value false \
+  --confidence 0.96
+
+vstore judgment search --kind needs_visual_inspection --value true
+vstore judgment search --producer jev --confidence-below 0.70
+```
+
+`features`は、保存済みhash・寸法・sizeと直前frameとのpixel一致だけを返し、画像を取得・表示しません。Jev連携はVisual Storeのcoreではなく[Skillのadapter workflow](skills/visual-store/references/jev-adapter.md)が担います。`put`を含むcore commandはネットワーク接続、Jev、APIキーを一切必要としません。外部agentはmetadata、features、過去のjudgmentを先に読み、`needs_visual_inspection=true`またはconfidence不足のときだけ`get`してVisionへ渡せます。設計判断と後回しにしたfeatureは[Judgment Layer ADR](docs/adr/0005-judgment-layer.md)に記録しています。
 
 完全な仕様は[CLIリファレンス](docs/cli.md)、[JSON Schema v2](docs/cli.schema.json)、[保存形式](docs/storage-format.md)を参照してください。旧schema v1のconsumerはv2のrepresentation、pack、get-frame、prune契約へ更新が必要です。
 
@@ -83,7 +102,7 @@ ln -s ../../skills/visual-store .agents/skills/visual-store
 
 すべての`vstore`プロセスを終了し、storeディレクトリ全体をコピーしてから、コピー先で`vstore --store COPY verify`を実行してください。storeの使用中に`index.sqlite3`だけをコピーしないでください。MVPは画像レコード、blob、exports、一時的な孤立候補を自動削除しません。
 
-format version 1のstoreは読み取り専用で開けます。書き込み前に、全体バックアップを取得してから`vstore --store STORE migrate --to 2`を明示実行してください。中断時は通常操作が`E_MIGRATION_INCOMPLETE`で停止します。`--resume`で安全に再開するか、`--restore`でv1バックアップへ戻せます。
+format version 1のstoreは読み取り専用で開けます。書き込み前に、全体バックアップを取得してから`vstore --store STORE migrate --to 2`を明示実行してください。既存のversion 2 storeへJudgment Layerを追加するときは`migrate --to 3`を実行します。各migrationの中断時は通常操作が`E_MIGRATION_INCOMPLETE`で停止します。同じtargetへ`--resume`して再開するか、`--restore`で直前versionへ戻せます。
 
 storeディレクトリとファイルは、POSIX環境でそれぞれ`0700`と`0600`で作成します。既存の所有者や権限は変更しません。ネットワークファイルシステムと複数ホストからの同時利用はサポート対象外です。
 

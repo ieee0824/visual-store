@@ -1,14 +1,17 @@
 use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
 use serde_json::{Value, json};
 use std::{
-    io::{self, Write},
+    fs::File,
+    io::{self, Read, Write},
     path::PathBuf,
 };
 use visual_store::{
     Error, PutOptions, Result, Store,
     image::Limits,
-    store::{PackOptions, PruneOptions},
+    store::{JudgmentFilter, JudgmentInput, PackOptions, PruneOptions},
 };
+
+const MAX_JUDGMENT_INPUT_BYTES: u64 = 64 * 1024;
 
 #[derive(Parser)]
 #[command(
@@ -81,6 +84,9 @@ enum Command {
     Info {
         reference: String,
     },
+    Features {
+        reference: String,
+    },
     List {
         #[arg(long)]
         run: Option<String>,
@@ -150,6 +156,62 @@ enum Command {
         #[arg(long, conflicts_with = "resume")]
         restore: bool,
     },
+    Judgment {
+        #[command(subcommand)]
+        command: JudgmentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum JudgmentCommand {
+    Add {
+        reference: String,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        producer: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        schema_version: Option<u32>,
+        #[arg(long)]
+        value: Option<String>,
+        #[arg(long)]
+        probability: Option<f64>,
+        #[arg(long)]
+        confidence: Option<f64>,
+        #[arg(long)]
+        metadata: Option<String>,
+        #[arg(long = "json", conflicts_with = "stdin")]
+        json_file: Option<PathBuf>,
+        #[arg(long, conflicts_with = "json_file")]
+        stdin: bool,
+    },
+    List {
+        reference: String,
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        producer: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    Search {
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(long)]
+        producer: Option<String>,
+        #[arg(long)]
+        value: Option<String>,
+        #[arg(long)]
+        confidence_below: Option<f64>,
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Variant {
@@ -160,6 +222,104 @@ enum Variant {
 enum Codec {
     Vp9,
     Av1,
+}
+
+fn user_json(raw: &str, label: &str) -> Result<Value> {
+    serde_json::from_str(raw)
+        .map_err(|_| Error::new("E_INVALID_ARGUMENT", format!("{label} must be valid JSON.")))
+}
+
+fn judgment_from_reader(mut reader: impl Read) -> Result<JudgmentInput> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_JUDGMENT_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_JUDGMENT_INPUT_BYTES {
+        return Err(Error::new(
+            "E_LIMIT_EXCEEDED",
+            "Judgment JSON exceeds the 64 KiB input limit.",
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| {
+        Error::new(
+            "E_INVALID_ARGUMENT",
+            "Judgment input must match the documented JSON object.",
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn judgment_input(
+    kind: Option<String>,
+    producer: Option<String>,
+    model: Option<String>,
+    schema_version: Option<u32>,
+    value: Option<String>,
+    probability: Option<f64>,
+    confidence: Option<f64>,
+    metadata: Option<String>,
+    json_file: Option<PathBuf>,
+    stdin: bool,
+) -> Result<JudgmentInput> {
+    let has_inline = kind.is_some()
+        || producer.is_some()
+        || model.is_some()
+        || schema_version.is_some()
+        || value.is_some()
+        || probability.is_some()
+        || confidence.is_some()
+        || metadata.is_some();
+    if let Some(path) = json_file {
+        if has_inline {
+            return Err(Error::new(
+                "E_INVALID_ARGUMENT",
+                "Use either --json or inline judgment fields, not both.",
+            ));
+        }
+        return judgment_from_reader(File::open(path)?);
+    }
+    if stdin {
+        if has_inline {
+            return Err(Error::new(
+                "E_INVALID_ARGUMENT",
+                "Use either --stdin or inline judgment fields, not both.",
+            ));
+        }
+        return judgment_from_reader(io::stdin().lock());
+    }
+    let kind = kind.ok_or_else(|| {
+        Error::new(
+            "E_INVALID_ARGUMENT",
+            "Inline judgment input requires --kind.",
+        )
+    })?;
+    let producer = producer.ok_or_else(|| {
+        Error::new(
+            "E_INVALID_ARGUMENT",
+            "Inline judgment input requires --producer.",
+        )
+    })?;
+    let value = value.ok_or_else(|| {
+        Error::new(
+            "E_INVALID_ARGUMENT",
+            "Inline judgment input requires --value JSON.",
+        )
+    })?;
+    Ok(JudgmentInput {
+        kind,
+        producer,
+        model,
+        schema_version: schema_version.unwrap_or(1),
+        value: user_json(&value, "Judgment value")?,
+        probability,
+        confidence,
+        metadata: metadata
+            .as_deref()
+            .map(|raw| user_json(raw, "Judgment metadata"))
+            .transpose()?
+            .unwrap_or_else(|| json!({})),
+    })
 }
 
 fn run(cli: Cli) -> Result<(Value, i32)> {
@@ -199,7 +359,14 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
         }
         return Ok((outcome.data, 0));
     }
-    let writable = matches!(cli.command, Command::Put { .. } | Command::Pack { .. });
+    let writable = matches!(
+        &cli.command,
+        Command::Put { .. }
+            | Command::Pack { .. }
+            | Command::Judgment {
+                command: JudgmentCommand::Add { .. }
+            }
+    );
     let mut store = Store::open(&cli.store, writable)?;
     store.limits = limits.clone();
     let data = match cli.command {
@@ -231,6 +398,7 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
             },
         )?,
         Command::Info { reference } => store.info(&reference)?,
+        Command::Features { reference } => store.lightweight_features(&reference)?,
         Command::List { run, limit, cursor } => store.list(run, limit, cursor.as_deref())?,
         Command::Get {
             reference,
@@ -319,6 +487,71 @@ fn run(cli: Cli) -> Result<(Value, i32)> {
         }
         Command::Migrate { .. } => unreachable!(),
         Command::Prune { .. } => unreachable!(),
+        Command::Judgment { command } => match command {
+            JudgmentCommand::Add {
+                reference,
+                kind,
+                producer,
+                model,
+                schema_version,
+                value,
+                probability,
+                confidence,
+                metadata,
+                json_file,
+                stdin,
+            } => store.add_judgment(
+                &reference,
+                judgment_input(
+                    kind,
+                    producer,
+                    model,
+                    schema_version,
+                    value,
+                    probability,
+                    confidence,
+                    metadata,
+                    json_file,
+                    stdin,
+                )?,
+            )?,
+            JudgmentCommand::List {
+                reference,
+                kind,
+                producer,
+                limit,
+                cursor,
+            } => store.list_judgments(
+                &reference,
+                JudgmentFilter {
+                    kind,
+                    producer,
+                    ..JudgmentFilter::default()
+                },
+                limit,
+                cursor.as_deref(),
+            )?,
+            JudgmentCommand::Search {
+                kind,
+                producer,
+                value,
+                confidence_below,
+                limit,
+                cursor,
+            } => store.search_judgments(
+                JudgmentFilter {
+                    kind,
+                    producer,
+                    value: value
+                        .as_deref()
+                        .map(|raw| user_json(raw, "Judgment value"))
+                        .transpose()?,
+                    confidence_below,
+                },
+                limit,
+                cursor.as_deref(),
+            )?,
+        },
     };
     Ok((data, 0))
 }

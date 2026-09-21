@@ -14,7 +14,7 @@ fn initialization_preserves_id_and_unrelated_files() {
     h.error(&["list"], "E_STORE_NOT_INITIALIZED");
     let a = h.call(&["init"]);
     let b = h.call(&["init"]);
-    assert_eq!(a["schema_version"], 2);
+    assert_eq!(a["schema_version"], 3);
     assert_eq!(a["store_id"], b["store_id"]);
     assert_eq!(b["already_initialized"], true);
     assert_eq!(

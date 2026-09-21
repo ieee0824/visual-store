@@ -68,7 +68,7 @@ fn stdout_obeys_json_schema_and_size_budgets() {
     };
     check(&["list"], 4096);
     check(&["init"], 4096);
-    check(&["migrate", "--to", "2"], 4096);
+    check(&["migrate", "--to", "3"], 4096);
     let p = check(
         &[
             "put",
@@ -96,6 +96,35 @@ fn stdout_obeys_json_schema_and_size_budgets() {
     check(&["get-frame", "--run", "framed", "--frame", "0"], 4096);
     let r = p["data"]["ref"].as_str().unwrap();
     check(&["info", r], 8192);
+    check(&["features", r], 8192);
+    check(
+        &[
+            "judgment",
+            "add",
+            r,
+            "--kind",
+            "needs_visual_inspection",
+            "--producer",
+            "rule",
+            "--value",
+            "false",
+            "--confidence",
+            "0.99",
+        ],
+        8192,
+    );
+    check(&["judgment", "list", r], 16384);
+    check(
+        &[
+            "judgment",
+            "search",
+            "--kind",
+            "needs_visual_inspection",
+            "--value",
+            "false",
+        ],
+        16384,
+    );
     check(&["get", r], 4096);
     check(&["list"], 16384);
     check(&["verify"], 8192);

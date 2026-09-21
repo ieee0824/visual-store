@@ -27,8 +27,8 @@ escaping and the trailing newline:
 
 | Commands | Maximum |
 | --- | ---: |
-| `init`, `put`, `info`, `get`, `get-frame`, `migrate` | 8 KiB |
-| `list`, `pack`, `prune`, `verify` | 16 KiB |
+| `init`, `put`, `info`, `features`, `get`, `get-frame`, `migrate`, `judgment add` | 8 KiB |
+| `list`, `judgment list`, `judgment search`, `pack`, `prune`, `verify` | 16 KiB |
 
 No command writes PNG, VP9, reconstruction objects, Base64, or data URLs to stdout.
 
@@ -53,6 +53,40 @@ The input is opened once, bounded, copied into a store temporary file, and check
 ### info
 
 Accepts a full `visual://STORE_UUID/images/IMAGE_UUID` reference or an image UUID in the selected store. Returns registered metadata and hashes without reading the blob into stdout. Use `verify` when current blob integrity matters.
+
+### features
+
+`features REF` returns evidence that is already stored or obtainable through an indexed lookup: source and decoded-pixel SHA-256, dimensions, source byte length, active shared representation size, and the preceding frame's reference and pixel-hash equality when the image belongs to a `(run, stream)` sequence. It does not materialize an export, decode packed frames, calculate perceptual hashes, invoke OCR, or use a network.
+
+`representation_bytes` can be shared by multiple images and must not be summed per image. Exact pixel-diff ratio and perceptual hash are deferred because they require image decoding or a new versioned algorithm.
+
+### judgment add
+
+Inline form requires `REF`, `--kind`, `--producer`, and `--value JSON`. Optional fields are `--model`, `--schema-version` (default 1), `--probability 0..1`, `--confidence 0..1`, and `--metadata JSON_OBJECT`.
+
+```bash
+vstore judgment add 'visual://STORE/images/IMAGE' \
+  --kind needs_visual_inspection \
+  --producer jev \
+  --model jev-1.13.0 \
+  --value false \
+  --probability 0.04 \
+  --confidence 0.96
+```
+
+Use `--json FILE` or `--stdin` instead of all inline fields to provide one JSON object. Input is bounded to 64 KiB; encoded `value` and `metadata` are each bounded to 4 KiB and to 6 KiB combined, and metadata must be an object. Strings passed through `--value` use JSON spelling, for example `--value '"unexpected"'`. Multiple judgments of any kind or producer can be appended to the same image.
+
+### judgment list and search
+
+`judgment list REF` accepts optional `--kind`, `--producer`, `--limit 1..100`, and `--cursor`. `judgment search` applies the same pagination across the store and additionally accepts `--value JSON` for exact canonical-JSON equality and `--confidence-below 0..1` for an exclusive upper bound. Examples:
+
+```bash
+vstore judgment search --kind needs_visual_inspection --value true
+vstore judgment search --producer jev --confidence-below 0.70
+vstore judgment search --producer vision-llm
+```
+
+Judgment cursors bind the store and every filter to a stable maximum sequence. `probability` and `confidence` are distinct optional producer fields; Visual Store does not derive or reinterpret either value.
 
 ### list
 
@@ -131,9 +165,9 @@ and after. Shared blobs and segments are not multiplied per image.
 
 ### migrate
 
-`migrate --to 2` is the only operation that upgrades a version-1 store. Merely opening an old store never changes it: read operations remain available, while `put` returns `E_SCHEMA_VERSION` until migration. Stop other writers and back up the whole store before migration.
+`migrate --to 2` upgrades a version-1 store. `migrate --to 3` upgrades a version-2 store with the additive judgment schema. Run the steps in order for a version-1 store. Merely opening an old store never changes it: version-1 read operations remain available, and existing image operations continue on version 2, while judgment commands require version 3. Stop other writers and back up the whole store before migration.
 
-Migration first creates and validates an on-store SQLite backup, then records a durable journal before changing the database and manifest. If interrupted, normal commands return `E_MIGRATION_INCOMPLETE`. Use `migrate --to 2 --resume` to roll forward or `migrate --to 2 --restore` to restore version 1. These are crash-recoverable ordered updates across SQLite and JSON files, not a claim of cross-file atomicity. A successful cleanup removes the migration journal and backup.
+Each migration first creates and validates an on-store SQLite backup, then records a durable journal before changing the database and manifest. If interrupted, normal commands return `E_MIGRATION_INCOMPLETE`. Repeat the matching target with `--resume` to roll forward or `--restore` to restore its source version. These are crash-recoverable ordered updates across SQLite and JSON files, not a claim of cross-file atomicity. A successful cleanup removes the migration journal and backup.
 
 ## Global resource limits
 
@@ -156,6 +190,8 @@ by the benchmark. Increasing limits is an explicit caller decision. The same inc
 bounds may be needed for a later `verify`.
 
 Metadata limits are run and stream 128 bytes each, label 256 bytes, note 2,048 bytes, and at most 16 nonempty tags of 64 bytes each. Operation IDs are 1 through 128 bytes. Escaped metadata is also capped to preserve the 8 KiB `info` response budget.
+
+Judgment kind and producer are at most 128 UTF-8 bytes; model is at most 256. Judgment JSON input is at most 64 KiB; persisted value and metadata are each at most 4 KiB and at most 6 KiB combined.
 
 ## Exit statuses
 

@@ -95,7 +95,7 @@ fn put_sequence(h: &Harness, run: &str, count: usize, identical: bool) {
 fn dry_run_then_pack_is_atomic_retryable_and_readable() {
     let h = Harness::new();
     h.init();
-    h.call(&["migrate", "--to", "2"]);
+    h.call(&["migrate", "--to", "3"]);
     h.error(
         &["pack", "--run", "demo", "--codec", "av1", "--dry-run"],
         "E_CODEC_UNAVAILABLE",
@@ -194,7 +194,7 @@ fn dry_run_then_pack_is_atomic_retryable_and_readable() {
 fn retained_source_is_byte_exact_after_temporal_pack() {
     let h = Harness::new();
     h.init();
-    h.call(&["migrate", "--to", "2"]);
+    h.call(&["migrate", "--to", "3"]);
     let mut originals = Vec::new();
     for index in 0..4 {
         let bytes = frame(256, 128, index);
@@ -232,7 +232,7 @@ fn retained_source_is_byte_exact_after_temporal_pack() {
 fn corrupt_temporal_objects_and_mappings_never_publish_output() {
     let base = Harness::new();
     base.init();
-    base.call(&["migrate", "--to", "2"]);
+    base.call(&["migrate", "--to", "3"]);
     put_sequence(&base, "corrupt", 4, false);
     assert_eq!(
         base.call(&["pack", "--run", "corrupt", "--segment-frames", "4"])["segments_packed"],
@@ -299,7 +299,7 @@ fn corrupt_temporal_objects_and_mappings_never_publish_output() {
 fn identical_frames_are_retained_when_distinct_png_is_smaller() {
     let h = Harness::new();
     h.init();
-    h.call(&["migrate", "--to", "2"]);
+    h.call(&["migrate", "--to", "3"]);
     put_sequence(&h, "same", 4, true);
     let report = h.call(&["pack", "--run", "same", "--segment-frames", "4"]);
     assert_eq!(report["segments_packed"], 0, "{report}");
@@ -346,7 +346,7 @@ fn random_and_photographic_sequences_retain_png_when_accounting_is_worse() {
 fn segment_frame_boundaries_leave_a_single_tail_as_png() {
     let h = Harness::new();
     h.init();
-    h.call(&["migrate", "--to", "2"]);
+    h.call(&["migrate", "--to", "3"]);
     put_sequence(&h, "boundary", 9, false);
     let report = h.call(&["pack", "--run", "boundary", "--segment-frames", "4"]);
     assert_eq!(report["segments_packed"], 2, "{report}");
@@ -600,7 +600,7 @@ fn pack_resource_failures_leave_png_active_and_retrievable() {
 fn crashes_at_every_pack_publication_boundary_are_retryable() {
     let source = Harness::new();
     source.init();
-    source.call(&["migrate", "--to", "2"]);
+    source.call(&["migrate", "--to", "3"]);
     put_sequence(&source, "crash", 4, false);
     for point in [
         "pack_before_object_publish",

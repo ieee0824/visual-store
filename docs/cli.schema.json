@@ -13,7 +13,10 @@
             { "$ref": "#/$defs/init" },
             { "$ref": "#/$defs/put" },
             { "$ref": "#/$defs/info" },
+            { "$ref": "#/$defs/features" },
             { "$ref": "#/$defs/list" },
+            { "$ref": "#/$defs/judgment" },
+            { "$ref": "#/$defs/judgmentList" },
             { "$ref": "#/$defs/get" },
             { "$ref": "#/$defs/verify" },
             { "$ref": "#/$defs/pack" },
@@ -57,7 +60,7 @@
       "type": "object",
       "properties": {
         "store_id": { "$ref": "#/$defs/uuid" },
-        "schema_version": { "enum": [1, 2] },
+        "schema_version": { "enum": [1, 2, 3] },
         "already_initialized": { "type": "boolean" }
       },
       "required": ["store_id", "schema_version", "already_initialized"],
@@ -146,6 +149,78 @@
       "type": "object",
       "properties": {
         "items": { "type": "array", "items": { "$ref": "#/$defs/listItem" }, "maxItems": 100 },
+        "next_cursor": { "type": "string", "maxLength": 4096 }
+      },
+      "required": ["items"],
+      "additionalProperties": false
+    },
+    "features": {
+      "type": "object",
+      "properties": {
+        "ref": { "type": "string", "pattern": "^visual://[0-9a-f-]{36}/images/[0-9a-f-]{36}$" },
+        "image_id": { "$ref": "#/$defs/uuid" },
+        "run": { "$ref": "#/$defs/nullableString" },
+        "stream": { "$ref": "#/$defs/nullableString" },
+        "frame_no": { "$ref": "#/$defs/nullableFrame" },
+        "sha256": {
+          "type": "object",
+          "properties": {
+            "source": { "$ref": "#/$defs/hash" },
+            "pixels": { "$ref": "#/$defs/hash" },
+            "stored_png": { "oneOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] }
+          },
+          "required": ["source", "pixels", "stored_png"],
+          "additionalProperties": false
+        },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "source_bytes": { "type": "integer", "minimum": 1 },
+        "representation_bytes": { "type": "integer", "minimum": 1 },
+        "representation_bytes_semantics": { "const": "shared_and_not_additive_across_images" },
+        "previous": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "properties": {
+                "ref": { "type": "string", "pattern": "^visual://[0-9a-f-]{36}/images/[0-9a-f-]{36}$" },
+                "image_id": { "$ref": "#/$defs/uuid" },
+                "pixel_sha256": { "$ref": "#/$defs/hash" },
+                "same_pixels": { "type": "boolean" }
+              },
+              "required": ["ref", "image_id", "pixel_sha256", "same_pixels"],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": ["ref", "image_id", "run", "stream", "frame_no", "sha256", "width", "height", "source_bytes", "representation_bytes", "representation_bytes_semantics", "previous"],
+      "additionalProperties": false
+    },
+    "judgment": {
+      "type": "object",
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "judgment_id": { "$ref": "#/$defs/uuid" },
+        "ref": { "type": "string", "pattern": "^visual://[0-9a-f-]{36}/images/[0-9a-f-]{36}$" },
+        "image_id": { "$ref": "#/$defs/uuid" },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "producer": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "model": { "$ref": "#/$defs/nullableString" },
+        "schema_version": { "type": "integer", "minimum": 1 },
+        "value": {},
+        "probability": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "metadata": { "type": "object" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["judgment_id", "ref", "image_id", "kind", "producer", "model", "schema_version", "value", "probability", "confidence", "metadata", "created_at"],
+      "additionalProperties": false
+    },
+    "judgmentList": {
+      "type": "object",
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/$defs/judgment" }, "maxItems": 100 },
         "next_cursor": { "type": "string", "maxLength": 4096 }
       },
       "required": ["items"],
@@ -279,8 +354,8 @@
       "type": "object",
       "properties": {
         "store_id": { "$ref": "#/$defs/uuid" },
-        "from_version": { "enum": [1, 2] },
-        "to_version": { "enum": [1, 2] },
+        "from_version": { "enum": [1, 2, 3] },
+        "to_version": { "enum": [1, 2, 3] },
         "migrated": { "type": "boolean" },
         "resumed": { "type": "boolean" },
         "restored": { "type": "boolean" }

@@ -17,14 +17,18 @@ use serde_json::{Value, json};
 use std::{fs, io::Write, path::Path, time::Duration};
 use uuid::Uuid;
 
+mod judgment;
+mod migration_v3;
 mod pack;
 mod prune;
 mod retrieval;
+pub use judgment::{JudgmentFilter, JudgmentInput};
 pub use pack::{PackOptions, PackOutcome};
 pub use prune::{PruneOptions, PruneOutcome};
 
 const ENCODING: &str = "png-idat-zlib-v1";
-const CURRENT_FORMAT_VERSION: u32 = 2;
+const V2_FORMAT_VERSION: u32 = 2;
+const LATEST_FORMAT_VERSION: u32 = 3;
 const MIGRATION_JOURNAL: &str = "migration-v1-to-v2.json";
 const MIGRATION_BACKUP: &str = "migration-v1-backup.sqlite3";
 const MIGRATION_BACKUP_FILES: [&str; 4] = [
@@ -338,7 +342,7 @@ fn manifest(root: &Dir) -> Result<Manifest> {
         )
     })?;
     let m: Manifest = serde_json::from_slice(&filesystem::read_bounded(&mut f, 4096)?)?;
-    if !matches!(m.format_version, 1 | CURRENT_FORMAT_VERSION) {
+    if !(1..=LATEST_FORMAT_VERSION).contains(&m.format_version) {
         return Err(Error::new("E_SCHEMA_VERSION", "Unsupported store format."));
     }
     Ok(m)
@@ -365,7 +369,7 @@ fn migration_journal(root: &Dir) -> Result<Option<MigrationJournal>> {
         serde_json::from_slice(&filesystem::read_bounded(&mut file, 4096)?)?;
     if journal.journal_version != 1
         || journal.from_version != 1
-        || journal.to_version != CURRENT_FORMAT_VERSION
+        || journal.to_version != V2_FORMAT_VERSION
         || journal.backup_file != MIGRATION_BACKUP
     {
         return Err(integrity("Invalid migration journal."));
@@ -375,12 +379,12 @@ fn migration_journal(root: &Dir) -> Result<Option<MigrationJournal>> {
 fn migration_incomplete() -> Error {
     Error::new(
         "E_MIGRATION_INCOMPLETE",
-        "Store migration is incomplete; run migrate --to 2 --resume or --restore.",
+        "Store migration is incomplete; resume or restore its recorded target version.",
     )
 }
 fn check_store(root: &Dir, c: &Connection, m: &Manifest) -> Result<()> {
     let version = database_version(c)?;
-    if version != m.format_version || !matches!(version, 1 | CURRENT_FORMAT_VERSION) {
+    if version != m.format_version || !(1..=LATEST_FORMAT_VERSION).contains(&version) {
         return Err(Error::new(
             "E_SCHEMA_VERSION",
             "Manifest and database schema versions are unsupported or inconsistent.",
@@ -544,9 +548,14 @@ fn restore_v1(
 
 impl Store {
     pub fn migrate(path: &Path, to: u32, resume: bool, restore: bool) -> Result<Value> {
-        if to != CURRENT_FORMAT_VERSION {
-            return Err(invalid("Only migration target 2 is supported."));
+        match to {
+            V2_FORMAT_VERSION => Self::migrate_v1_to_v2(path, resume, restore),
+            LATEST_FORMAT_VERSION => migration_v3::migrate(path, resume, restore),
+            _ => Err(invalid("Only migration targets 2 and 3 are supported.")),
         }
+    }
+
+    fn migrate_v1_to_v2(path: &Path, resume: bool, restore: bool) -> Result<Value> {
         if resume && restore {
             return Err(invalid("Choose either --resume or --restore."));
         }
@@ -563,6 +572,16 @@ impl Store {
         let mut connection = connect(&root, true)?;
         let mut journal = migration_journal(&root)?;
         let initial_version = database_version(&connection)?;
+
+        if journal.is_none()
+            && manifest_value.format_version > V2_FORMAT_VERSION
+            && initial_version > V2_FORMAT_VERSION
+        {
+            return Err(Error::new(
+                "E_SCHEMA_VERSION",
+                "Migration cannot downgrade a version 3 store to version 2.",
+            ));
+        }
 
         if journal.is_some() && !resume && !restore {
             return Err(migration_incomplete());
@@ -587,13 +606,13 @@ impl Store {
         }
 
         if journal.is_none()
-            && manifest_value.format_version == CURRENT_FORMAT_VERSION
-            && initial_version == CURRENT_FORMAT_VERSION
+            && manifest_value.format_version == V2_FORMAT_VERSION
+            && initial_version == V2_FORMAT_VERSION
         {
             return Ok(json!({
                 "store_id": manifest_value.store_id,
-                "from_version": CURRENT_FORMAT_VERSION,
-                "to_version": CURRENT_FORMAT_VERSION,
+                "from_version": V2_FORMAT_VERSION,
+                "to_version": V2_FORMAT_VERSION,
                 "migrated": false,
                 "resumed": false,
                 "restored": false
@@ -610,7 +629,7 @@ impl Store {
                 journal_version: 1,
                 store_id: manifest_value.store_id,
                 from_version: 1,
-                to_version: CURRENT_FORMAT_VERSION,
+                to_version: V2_FORMAT_VERSION,
                 state: MigrationState::Started,
                 backup_file: MIGRATION_BACKUP.into(),
                 started_at: now(),
@@ -641,7 +660,7 @@ impl Store {
                 apply_v2_schema(&mut connection, &journal)?;
                 fault("migration_after_db_commit")?;
             }
-            CURRENT_FORMAT_VERSION => {}
+            V2_FORMAT_VERSION => {}
             _ => return Err(migration_incomplete()),
         }
         journal.state = MigrationState::DbCommitted;
@@ -650,11 +669,11 @@ impl Store {
 
         match manifest_value.format_version {
             1 => {
-                manifest_value.format_version = CURRENT_FORMAT_VERSION;
+                manifest_value.format_version = V2_FORMAT_VERSION;
                 write_manifest(&root, &manifest_value)?;
                 fault("migration_after_manifest")?;
             }
-            CURRENT_FORMAT_VERSION => {}
+            V2_FORMAT_VERSION => {}
             _ => return Err(migration_incomplete()),
         }
         journal.state = MigrationState::ManifestUpdated;
@@ -686,7 +705,7 @@ impl Store {
         Ok(json!({
             "store_id": manifest_value.store_id,
             "from_version": 1,
-            "to_version": CURRENT_FORMAT_VERSION,
+            "to_version": V2_FORMAT_VERSION,
             "migrated": true,
             "resumed": resume,
             "restored": false
@@ -697,7 +716,7 @@ impl Store {
         let root = Dir::create_root(path)?;
         root.lock(true)?;
         if fs::read_dir(&root.path)?.next().is_some() {
-            if migration_journal(&root)?.is_some() {
+            if migration_journal(&root)?.is_some() || migration_v3::journal_exists(&root)? {
                 return Err(migration_incomplete());
             }
             let m = manifest(&root)?;
@@ -711,7 +730,7 @@ impl Store {
         }
         let m = Manifest {
             store_id: Uuid::new_v4(),
-            format_version: CURRENT_FORMAT_VERSION,
+            format_version: LATEST_FORMAT_VERSION,
         };
         root.child("objects", true)?.child("sha256", true)?;
         root.child("tmp", true)?;
@@ -722,6 +741,7 @@ impl Store {
         let tx = c.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch("CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
         tx.execute_batch(include_str!("../migrations/002.sql"))?;
+        tx.execute_batch(include_str!("../migrations/003.sql"))?;
         tx.execute(
             "INSERT INTO store_meta VALUES ('store_id',?1)",
             [m.store_id.to_string()],
@@ -735,7 +755,7 @@ impl Store {
         }
         root.sync()?;
         Ok(
-            json!({"store_id":m.store_id,"schema_version":CURRENT_FORMAT_VERSION,"already_initialized":false}),
+            json!({"store_id":m.store_id,"schema_version":LATEST_FORMAT_VERSION,"already_initialized":false}),
         )
     }
     pub fn open(path: &Path, writable: bool) -> Result<Self> {
@@ -753,7 +773,7 @@ impl Store {
                 "Initialize the selected store first.",
             ));
         }
-        if migration_journal(&root)?.is_some() {
+        if migration_journal(&root)?.is_some() || migration_v3::journal_exists(&root)? {
             return Err(migration_incomplete());
         }
         let m = manifest(&root)?;
@@ -1240,7 +1260,7 @@ impl Store {
             let length: u64 = row.get(2)?;
             let media: String = row.get(3)?;
             let kind: String = row.get(4)?;
-            if self.format_version == 2 && kind == "png" {
+            if self.format_version >= 2 && kind == "png" {
                 let expected_present: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM representations WHERE representation_kind='png' AND png_blob_sha256=?1 UNION SELECT 1 FROM images WHERE source_blob_sha256=?1 UNION SELECT 1 FROM retired_representations WHERE representation_kind='png' AND png_blob_sha256=?1 AND prune_state!='deleted')",
                     [&hash], |row| row.get(0),
@@ -1309,7 +1329,7 @@ impl Store {
             }
         }
         let mut segments_checked = 0u64;
-        if self.format_version == 2 {
+        if self.format_version >= 2 {
             let segment_ids = {
                 let mut statement =
                     tx.prepare("SELECT segment_id FROM segments ORDER BY segment_id")?;

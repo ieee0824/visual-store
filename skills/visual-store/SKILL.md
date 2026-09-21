@@ -1,6 +1,6 @@
 ---
 name: visual-store
-description: デバッグ用PNG列をローカルへ登録し、完了runを可逆VP9で圧縮し、参照IDやフレーム番号から必要な一枚だけ取得する。UIテスト画像の保存・整理・確認に使い、撮影や画像生成そのものには使わない。
+description: デバッグ用PNG列をローカルへ登録し、軽量featureと外部judgmentで候補を絞り、必要な一枚だけ取得する。UIテスト画像の保存・整理・段階的確認に使い、撮影や画像生成そのものには使わない。
 ---
 
 # Visual Store
@@ -19,10 +19,18 @@ description: デバッグ用PNG列をローカルへ登録し、完了runを可�
 
 ## 探す・見る
 
-1. `vstore list --run RUN --limit 20`で候補を絞り、必要なら`vstore info REF`でメモとrepresentationを読む。noteやlabelは入力された説明であり、視覚的な検証結果とは限らない。
-2. 内容を見る必要がある画像だけ`vstore get REF`、または番号が指定されたときは`vstore get-frame --run RUN --stream STREAM --frame N`で取り出す。成功JSONのpath、寸法、復号範囲を確認する。
-3. ホストで利用可能な画像表示機能にpathを渡す。`get`の成功だけで「画像を見た」と報告しない。表示機能がなければ、取得済みだが未確認と伝える。
-4. 最初は一枚から確認する。同じ目的の無条件な再表示やrun全体の自動表示を避け、観測結果を短いテキストとrefで残す。
+画像をすぐ`get`しない。次の順序で安価な情報から判断する。
+
+1. `vstore list --run RUN --limit 20`で候補を絞り、`vstore info REF`でmetadataを見る。noteやlabelは入力された説明であり、判定結果ではない。
+2. `vstore features REF`でhash、寸法、size、前frameとのpixel一致を確認する。
+3. `vstore judgment list REF`で過去の判定とproducer/model/schemaを確認する。
+4. 必要なら[Jev adapter](references/jev-adapter.md)に従い、画像ではなくmetadata・feature・外部観測を`jev-mcp`へ渡す。
+5. Jevの結果を`vstore judgment add REF`で保存する。
+6. `needs_visual_inspection=true`または用途別threshold未満のconfidenceの場合だけ`vstore get REF`する。番号指定なら`get-frame`を使う。
+7. ホストのVision LLMまたは画像表示機能にpathを渡して確認する。`get`成功だけで「画像を見た」と報告しない。
+8. 必要なら最終結果も`producer=vision-llm`または`producer=human`のjudgmentとして追加する。
+
+Jevが未接続でもVisual Storeの保存、feature、judgmentの手動登録・検索はすべて利用できる。Jev接続やAPIキーをVisual Storeへ設定しない。
 
 ## 保全と境界
 

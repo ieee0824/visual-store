@@ -27,7 +27,7 @@ fn frame(index: u8) -> Vec<u8> {
 fn packed_store(run: &str, keep_source: bool) -> (Harness, Vec<Vec<u8>>) {
     let h = Harness::new();
     h.init();
-    h.call(&["migrate", "--to", "2"]);
+    h.call(&["migrate", "--to", "3"]);
     let mut originals = Vec::new();
     for index in 0..8 {
         let bytes = frame(index);
@@ -119,7 +119,7 @@ fn corrupt_replacement_refuses_to_delete_recoverable_pngs() {
 fn shared_retired_pngs_are_counted_and_removed_once() {
     let h = Harness::new();
     h.init();
-    h.call(&["migrate", "--to", "2"]);
+    h.call(&["migrate", "--to", "3"]);
     for run in ["shared-a", "shared-b"] {
         for index in 0..8 {
             let path = h.temp.path().join(format!("shared-{index}.png"));

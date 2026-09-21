@@ -655,7 +655,7 @@ impl Store {
 
     pub fn pack(&mut self, mut options: PackOptions) -> Result<PackOutcome> {
         options.normalize()?;
-        if self.format_version != 2 {
+        if self.format_version < 2 {
             return Err(Error::new(
                 "E_SCHEMA_VERSION",
                 "Pack requires a version 2 store.",

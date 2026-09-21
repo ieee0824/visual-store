@@ -334,6 +334,112 @@ fn explicit_v1_migration_preserves_identity_metadata_and_legacy_retry() {
 }
 
 #[test]
+fn explicit_v2_to_v3_migration_preserves_images_and_blobs() {
+    let (_temp, root) = v1_copy();
+    let v2 = call(&root, &["migrate", "--to", "2"]);
+    assert_eq!(v2["to_version"], 2);
+
+    let before = Store::open(&root, false)
+        .unwrap()
+        .info(V1_REFERENCE)
+        .unwrap();
+    let connection = Connection::open(root.join("index.sqlite3")).unwrap();
+    let image_count: u64 = connection
+        .query_row("SELECT COUNT(*) FROM images", [], |row| row.get(0))
+        .unwrap();
+    let blob_count: u64 = connection
+        .query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get(0))
+        .unwrap();
+    drop(connection);
+
+    let old_judgment = command(&root)
+        .args([
+            "judgment",
+            "add",
+            V1_REFERENCE,
+            "--kind",
+            "needs_visual_inspection",
+            "--producer",
+            "jev",
+            "--value",
+            "false",
+        ])
+        .output()
+        .unwrap();
+    assert!(!old_judgment.status.success());
+    let old_error: Value = serde_json::from_slice(&old_judgment.stdout).unwrap();
+    assert_eq!(old_error["error"]["code"], "E_SCHEMA_VERSION");
+
+    let migrated = call(&root, &["migrate", "--to", "3"]);
+    assert_eq!(migrated["from_version"], 2);
+    assert_eq!(migrated["to_version"], 3);
+    assert_eq!(migrated["migrated"], true);
+    assert!(!root.join("migration-v2-to-v3.json").exists());
+    assert!(!root.join("migration-v2-backup.sqlite3").exists());
+
+    let after = Store::open(&root, false)
+        .unwrap()
+        .info(V1_REFERENCE)
+        .unwrap();
+    assert_eq!(after, before);
+    let connection = Connection::open(root.join("index.sqlite3")).unwrap();
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM images", [], |row| row
+                .get::<_, u64>(0))
+            .unwrap(),
+        image_count
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get::<_, u64>(0))
+            .unwrap(),
+        blob_count
+    );
+    let tables: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='judgments'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 1);
+    let migrations: Vec<(u32, u32)> = connection
+        .prepare("SELECT from_version,to_version FROM schema_migrations ORDER BY migration_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(migrations, vec![(1, 2), (2, 3)]);
+    drop(connection);
+
+    let judgment = call(
+        &root,
+        &[
+            "judgment",
+            "add",
+            V1_REFERENCE,
+            "--kind",
+            "needs_visual_inspection",
+            "--producer",
+            "jev",
+            "--value",
+            "false",
+            "--confidence",
+            "0.96",
+        ],
+    );
+    assert_eq!(judgment["value"], false);
+}
+
+#[test]
 fn v2_schema_enforces_representation_and_frame_location_constraints() {
     let h = Harness::new();
     h.init();
@@ -520,5 +626,91 @@ fn interrupted_migration_can_be_restored_and_restore_is_resumable() {
         );
         assert!(!root.join("migration-v1-to-v2.json").exists());
         assert!(!root.join("migration-v1-backup.sqlite3").exists());
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn version_three_migration_resumes_after_persistence_boundaries() {
+    for point in [
+        "migration_v3_after_backup",
+        "migration_v3_after_journal",
+        "migration_v3_before_db_commit",
+        "migration_v3_after_db_commit",
+        "migration_v3_after_db_journal",
+        "migration_v3_after_manifest",
+        "migration_v3_after_manifest_journal",
+        "migration_v3_before_cleanup",
+        "migration_v3_after_backup_cleanup",
+        "migration_v3_after_cleanup",
+    ] {
+        let (_temp, root) = v1_copy();
+        call(&root, &["migrate", "--to", "2"]);
+        let output = command(&root)
+            .args(["migrate", "--to", "3"])
+            .env("VSTORE_TEST_CRASH", point)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(91), "{point}");
+
+        let resumed = call(&root, &["migrate", "--to", "3", "--resume"]);
+        assert_eq!(resumed["to_version"], 3, "{point}");
+        assert!(!root.join("migration-v2-to-v3.json").exists(), "{point}");
+        assert!(
+            !root.join("migration-v2-backup.sqlite3").exists(),
+            "{point}"
+        );
+        assert_eq!(
+            Store::open(&root, false)
+                .unwrap()
+                .info(V1_REFERENCE)
+                .unwrap()["stored_sha256"],
+            V1_HASH,
+            "{point}"
+        );
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn version_three_migration_restore_is_resumable() {
+    for point in [
+        "migration_v3_restore_started",
+        "migration_v3_restore_after_db",
+        "migration_v3_restore_after_manifest",
+        "migration_v3_restore_after_journal_cleanup",
+    ] {
+        let (_temp, root) = v1_copy();
+        call(&root, &["migrate", "--to", "2"]);
+        let interrupted = command(&root)
+            .args(["migrate", "--to", "3"])
+            .env("VSTORE_TEST_CRASH", "migration_v3_after_manifest")
+            .output()
+            .unwrap();
+        assert_eq!(interrupted.status.code(), Some(91));
+        let restore = command(&root)
+            .args(["migrate", "--to", "3", "--restore"])
+            .env("VSTORE_TEST_CRASH", point)
+            .output()
+            .unwrap();
+        assert_eq!(restore.status.code(), Some(91), "{point}");
+        let restored = call(&root, &["migrate", "--to", "3", "--restore"]);
+        assert_eq!(restored["to_version"], 2, "{point}");
+        assert_eq!(
+            Connection::open(root.join("index.sqlite3"))
+                .unwrap()
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            2,
+            "{point}"
+        );
+        assert_eq!(
+            Store::open(&root, false)
+                .unwrap()
+                .info(V1_REFERENCE)
+                .unwrap()["stored_sha256"],
+            V1_HASH,
+            "{point}"
+        );
     }
 }

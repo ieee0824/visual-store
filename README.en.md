@@ -50,6 +50,8 @@ vstore --store "$PWD/.visual-store" prune --dry-run
 # Explicitly apply only after reviewing the report on an isolated store.
 vstore --store "$PWD/.visual-store" prune --apply
 vstore --store "$PWD/.visual-store" info 'visual://STORE_ID/images/IMAGE_ID'
+vstore --store "$PWD/.visual-store" features 'visual://STORE_ID/images/IMAGE_ID'
+vstore --store "$PWD/.visual-store" judgment list 'visual://STORE_ID/images/IMAGE_ID'
 vstore --store "$PWD/.visual-store" get 'visual://STORE_ID/images/IMAGE_ID'
 vstore --store "$PWD/.visual-store" verify
 ```
@@ -63,6 +65,23 @@ already displayed from model history. Packed byte savings are not image-token sa
 Store selection uses `--store PATH`, then `VSTORE_ROOT`, then `$CWD/.visual-store`. It never searches parent directories. Keep `.visual-store/` out of Git; this repository's `.gitignore` already excludes its local store.
 
 An observation with `--run` receives an immutable, zero-based `frame_no` within its `(run, stream)`; the stream defaults to `default`. Use `put --keep-source` when byte-for-byte retrieval of the input is required. Otherwise, only the validated lossless stored representation is retained. Use `--operation-id` for a retryable registration operation. Reusing an operation ID with different source bytes or metadata fails with `E_CONFLICT`.
+
+## Judgment layer
+
+Storage format version 3 can append multiple external judgments to each image. Each judgment independently preserves producer, model, producer schema version, JSON value, probability, confidence, metadata, and creation time. Rules, classical algorithms, Jev, vision models, and humans use the same storage model.
+
+```bash
+vstore judgment add 'visual://STORE/images/IMAGE' \
+  --kind needs_visual_inspection \
+  --producer jev \
+  --value false \
+  --confidence 0.96
+
+vstore judgment search --kind needs_visual_inspection --value true
+vstore judgment search --producer jev --confidence-below 0.70
+```
+
+`features` returns stored hashes, dimensions, sizes, and pixel identity with the preceding frame without retrieving or displaying an image. The [Skill adapter workflow](skills/visual-store/references/jev-adapter.md), not Visual Store core, calls the separately configured `jev-mcp`. Core commands including `put` need no network, Jev installation, or API key. An external agent can inspect metadata, features, and prior judgments first, and call `get` for vision only when inspection is requested or confidence is below its policy threshold. See the [Judgment Layer ADR](docs/adr/0005-judgment-layer.md) for boundaries and deferred features.
 
 See [the CLI reference](docs/cli.md), [JSON Schema v2](docs/cli.schema.json), and [storage format](docs/storage-format.md) for the complete contract. Consumers of the archived schema v1 must update for representation, pack, get-frame, and prune fields.
 
@@ -87,7 +106,7 @@ The integration was prepared against `codex-cli 0.154.0`. The automated tests ve
 
 Stop every `vstore` process, copy the entire store directory, then run `vstore --store COPY verify` on the copy. Do not copy only `index.sqlite3` while the store is active. The MVP does not delete records, blobs, exports, or temporary orphan candidates automatically.
 
-Format-version-1 stores remain readable but are read-only. Before writing, back up the complete store and explicitly run `vstore --store STORE migrate --to 2`. If interrupted, ordinary commands stop with `E_MIGRATION_INCOMPLETE`; use `--resume` to roll forward safely or `--restore` to return to the version-1 backup.
+Format-version-1 stores remain readable but are read-only. Before writing, back up the complete store and explicitly run `vstore --store STORE migrate --to 2`. Upgrade an existing version-2 store to the judgment schema with `migrate --to 3`. If either migration is interrupted, ordinary commands stop with `E_MIGRATION_INCOMPLETE`; repeat the same target with `--resume` to roll forward or `--restore` to return to the preceding version.
 
 The default store directory and files are created with POSIX modes `0700` and `0600`. Existing owners and permissions are not changed. Stores on network filesystems and multi-host concurrent use are unsupported.
 

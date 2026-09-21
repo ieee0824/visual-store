@@ -14,13 +14,18 @@ vstore [--store PATH] COMMAND
 | `init` | 未作成または空の専用ディレクトリを初期化。正常storeはIDを維持 |
 | `put --file PATH` | PNG登録。`--run`、`--stream`、`--label`、`--note`、複数の`--tag`、`--captured-at RFC3339`、`--operation-id`、`--keep-source`、`--compression-level 0..9` |
 | `info REF` | 寸法、メモ、タグ、ハッシュ、保存量、圧縮情報。完全性検査ではない |
+| `features REF` | 保存済みhash・寸法・sizeと、同じrun/streamの直前frameとのpixel一致。画像を展開・表示しない |
 | `list [--run RUN] [--limit N] [--cursor CURSOR]` | 新しい登録順。既定20件、最大100件。stdoutは最大16 KiBで、byte上限時は指定件数未満でもcursorを返す。次ページも同じrun条件を使う |
+| `judgment add REF ...` | 外部判定を追加。inline JSON value、`--json FILE`、`--stdin`に対応 |
+| `judgment list REF [--kind K] [--producer P]` | 画像のjudgmentを新しい順に取得 |
+| `judgment search [--kind K] [--producer P] [--value JSON] [--confidence-below N]` | store全体のjudgmentを検索 |
 | `get REF [--variant stored\|source] [--output PATH]` | PNGをコピーして絶対pathを返す。既定はexports配下。画像表示は行わない |
 | `get-frame --run RUN [--stream default] --frame N [--variant stored\|source] [--output PATH]` | frame索引から一枚だけPNGへ復元。segmentと復号範囲を返す |
 | `pack --run RUN [--stream STREAM] [--codec vp9] [--segment-frames 2..128] [--dry-run]` | 完了した列を検証済み不変segmentへ圧縮。不利ならPNGを維持。AV1は未実装で明示エラー |
 | `prune --dry-run\|--apply` | 検証済みretired PNGだけを明示整理。保存やpackの副作用では実行しない |
 | `verify [--report NEW_FILE]` | PNGと共有segmentの整合性検査。要約と最大20件の問題例。全問題はreportへ書く |
 | `migrate --to 2 [--resume\|--restore]` | v1 storeを明示移行。中断は再開またはv1へ復元 |
+| `migrate --to 3 [--resume\|--restore]` | v2 storeへjudgment schemaを追加。中断は再開またはv2へ復元 |
 
 REFは`visual://STORE_UUID/images/IMAGE_UUID`または選択store内のIMAGE_UUID。
 getとreportは出力先が既存ファイル・symlinkなら上書きせず失敗する。
@@ -28,6 +33,7 @@ sourceは登録時に`--keep-source`を付けた場合のみ取得できる。
 streamはrunがある場合のみ指定でき、runあり・stream省略時は`default`。`(run, stream)`ごとに0始まりの`frame_no`を割り当てる。明示した空streamは拒否する。
 get/get-frameはactive表現がPNGでもVP9でも検証済みPNGを返し、常に`displayed:false`。動画復号不能なbuildは`E_CODEC_UNAVAILABLE`を返す。
 infoの`shared_representation_bytes`は複数画像で共有され得るため、画像ごとに合計しない。
+Jev連携とVision escalationは[Jev adapter](jev-adapter.md)を参照。`put`や他のcore commandはJevを呼ばない。
 
 ## 再試行
 

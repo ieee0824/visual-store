@@ -239,7 +239,7 @@ impl Store {
     }
 
     pub fn resolve_frame(&self, run: &str, stream: &str, frame: u64) -> Result<String> {
-        if self.format_version != 2 {
+        if self.format_version < 2 {
             return Err(Error::new(
                 "E_SCHEMA_VERSION",
                 "Frame lookup requires a version 2 store.",

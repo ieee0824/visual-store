@@ -1,4 +1,6 @@
-use super::{Store, check_store, connect, manifest, migration_incomplete, migration_journal};
+use super::{
+    Store, check_store, connect, manifest, migration_incomplete, migration_journal, migration_v3,
+};
 use crate::{
     Error, Result,
     error::{integrity, invalid},
@@ -273,11 +275,11 @@ impl Store {
         }
         let root = Dir::open(path)?;
         root.lock(true)?;
-        if migration_journal(&root)?.is_some() {
+        if migration_journal(&root)?.is_some() || migration_v3::journal_exists(&root)? {
             return Err(migration_incomplete());
         }
         let manifest = manifest(&root)?;
-        if manifest.format_version != 2 {
+        if manifest.format_version < 2 {
             return Err(Error::new(
                 "E_SCHEMA_VERSION",
                 "Prune requires a version 2 store.",

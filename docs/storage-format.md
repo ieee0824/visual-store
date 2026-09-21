@@ -1,4 +1,4 @@
-# Storage format version 2
+# Storage format version 3
 
 ```text
 STORE/
@@ -13,9 +13,11 @@ STORE/
   exports/
   migration-v1-to-v2.json        # only while migration is incomplete
   migration-v1-backup.sqlite3    # only while migration is incomplete
+  migration-v2-to-v3.json        # only while migration is incomplete
+  migration-v2-backup.sqlite3    # only while migration is incomplete
 ```
 
-`store.json` contains only `store_id` and `format_version`. SQLite stores the same ID in `store_meta`; disagreement is an integrity error. Version 2 requires both the manifest version and `PRAGMA user_version` to equal 2. The schema sources are [002.sql](../migrations/002.sql), [001-to-002-prepare.sql](../migrations/001-to-002-prepare.sql), and [001-to-002-copy.sql](../migrations/001-to-002-copy.sql). Version 1 remains documented by its immutable [001.sql](../migrations/001.sql).
+`store.json` contains only `store_id` and `format_version`. SQLite stores the same ID in `store_meta`; disagreement is an integrity error. Version 3 requires both the manifest version and `PRAGMA user_version` to equal 3. A fresh schema is composed from [002.sql](../migrations/002.sql) and additive [003.sql](../migrations/003.sql). The v1-to-v2 sources remain [001-to-002-prepare.sql](../migrations/001-to-002-prepare.sql) and [001-to-002-copy.sql](../migrations/001-to-002-copy.sql); version 1 is documented by immutable [001.sql](../migrations/001.sql).
 
 ## Logical and physical model
 
@@ -30,9 +32,12 @@ The schema deliberately separates a captured observation from its current storag
 | `png_reconstruction` | Versioned reconstruction metadata needed to reproduce a PNG from a non-PNG representation. The descriptor is an immutable typed blob and may be shared by content hash. |
 | `blobs` | Immutable SHA-256-addressed bytes with an explicit object kind: PNG, VP9 bitstream, or PNG reconstruction descriptor. |
 | `retired_representations` | Superseded physical representations and their pruning state; observation rows are not replaced. |
+| `judgments` | Append-only external decisions for an image, including producer/model provenance, typed JSON value, optional probability/confidence, metadata, and creation time. |
 | `schema_migrations` | Durable history of explicit schema migrations. |
 
 `images.image_id`, `seq`, user metadata, source identity hashes, and `(run, stream, frame_no)` are observation properties. Repacking or changing the active representation must not change them. A database uniqueness constraint protects `(run, stream, frame_no)`. Registrations with a run allocate the next frame number in the same `BEGIN IMMEDIATE` transaction that inserts the observation. Registrations without a run have null stream and frame number.
+
+`judgments.seq` is an internal append sequence used for stable pagination; `judgment_id` is the external UUID. The foreign key binds each judgment to one image while permitting any number of kinds and producers per image. `value_json` and `metadata_json` are canonical compact JSON written by the application. Exact value search compares that canonical encoding. `probability` and `confidence` are independently nullable and constrained to 0 through 1; the producer defines their semantics. The image and blob relations contain no Jev-specific column or trigger.
 
 The stored PNG preserves IHDR values, the byte-exact decompressed filtered scanlines, decoded RGB/RGBA samples including hidden color under transparent pixels, and every accepted non-IDAT chunk in content and relative order. IDAT boundaries and compressed bytes may change. Recompression uses the selected zlib level and is adopted only when the candidate is smaller and round-trip validation succeeds.
 
@@ -99,8 +104,14 @@ This is an ordered roll-forward/restore protocol across SQLite and JSON files; i
 
 Migration keeps the store UUID, image UUID, registration sequence, source identity, accepted metadata, hashes, validation limits, and operation IDs/fingerprints. Each old run is assigned stream `default`, and its frame numbers are the zero-based order of the original `seq`; records without a run keep null stream/frame values. Legacy fingerprints are marked version 1 so an identical retry remains idempotent, while new fingerprints are stream-aware version 2.
 
+## Explicit migration from version 2
+
+`migrate --to 3` adds the judgment relation and generalizes migration-history constraints without rewriting image, blob, representation, segment, or reconstruction rows. It follows the same ordered protocol: validate a complete version-2 SQLite backup, publish `migration-v2-to-v3.json`, apply [003.sql](../migrations/003.sql) in one transaction, update the manifest only after the database commit, complete migration history, then remove the backup and journal.
+
+Ordinary commands stop while the journal exists. `--resume` inspects the database and manifest versions and completes the next safe step; `--restore` validates and restores the version-2 backup. Fault-injection tests cover each persistence boundary in both paths. A version-1 store must migrate to 2 and then to 3.
+
 ## Compatibility
 
-Version-2 code reads fixed version-1 stores for `info`, `list`, `get`, and `verify`; writes require explicit migration. The manifest is updated to 2 only after the database commit. Version-1 binaries accept only manifest/database version 1, so a successfully migrated store is rejected rather than misread. Unknown or mismatched versions are always rejected.
+Version-3 code reads fixed version-1 stores for `info`, `list`, `get`, and `verify`; writes require migration to 2. Existing image operations continue on a consistent version-2 store, but judgment operations return `E_SCHEMA_VERSION` until migration to 3. Each manifest is updated only after its database commit. Older binaries reject a newer manifest rather than misread it. Unknown or mismatched versions are always rejected.
 
 Keep `Cargo.lock` with releases and run the fixed version-1 fixture, migration interruption, and existing-blob compatibility suites before updating PNG, zlib, SQLite, or hashing dependencies.

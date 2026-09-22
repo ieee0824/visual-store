@@ -9,6 +9,16 @@ permissions:
   contents: read
 
 jobs:
+  debian12-arm64:
+    name: Debian 12 ARM64 libvpx 1.12
+    runs-on: ubuntu-24.04-arm
+    container: rust:1.98.1-bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Debian 12 ARM64 with system libvpx
+        run: bash tests/verify_debian12_arm64.sh
+
   vp9-required:
     name: VP9 required (${{ matrix.os }})
     strategy:

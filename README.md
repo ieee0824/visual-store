@@ -12,7 +12,7 @@ MVPは、非インターレースの静止8-bit RGB/RGBA PNGに対応してい�
 
 ## インストール
 
-現在の安定版Rustツールチェーン、Cコンパイラー、`pkg-config`、libvpx開発packageが必要です。
+現在の安定版Rustツールチェーン、Cコンパイラー、`pkg-config`、libvpx開発packageが必要です。対応するsystem libvpxの範囲は1.12.0〜1.16.0です。
 
 ```bash
 # macOS
@@ -127,4 +127,4 @@ Visual StoreはMITライセンスです。VP9 backendはBSD 3-Clauseのsystem li
 
 ## 対応環境
 
-ローカルファイルシステム上のmacOSとLinuxを対象とし、それ以外の環境では意図的にコンパイルエラーになります。CIは両OSでlibvpxを有効にしてテストします。この開発環境ではmacOS、Rust 1.95.0、libvpx 1.16.0でcodec試験を実行しました。
+ローカルファイルシステム上のmacOSとLinuxを対象とし、それ以外の環境では意図的にコンパイルエラーになります。CIはDebian 12 ARM64のlibvpx 1.12.0と、Ubuntu・macOSのsystem libvpxで既定のVP9 buildを検証します。この開発環境ではmacOS、Rust 1.95.0、libvpx 1.16.0でcodec試験を実行しました。

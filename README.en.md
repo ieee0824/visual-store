@@ -12,7 +12,7 @@ This repository started as a Rust 2024 project. Rust gives the parser checked ar
 
 ## Install
 
-Requirements: a current stable Rust toolchain, a C compiler, `pkg-config`, and the libvpx development package.
+Requirements: a current stable Rust toolchain, a C compiler, `pkg-config`, and the libvpx development package. The supported system libvpx range is 1.12.0 through 1.16.0.
 
 ```bash
 # macOS
@@ -131,4 +131,4 @@ Before redistribution, audit the complete transitive dependency graph and notice
 
 ## Platform status
 
-The implementation targets local filesystems on macOS and Linux and intentionally fails to compile elsewhere. CI tests both systems with libvpx enabled. Codec tests in this development environment ran on macOS with Rust 1.95.0 and libvpx 1.16.0.
+The implementation targets local filesystems on macOS and Linux and intentionally fails to compile elsewhere. CI checks the default VP9 build against libvpx 1.12.0 on Debian 12 ARM64 and the system libvpx packages on Ubuntu and macOS. Codec tests in this development environment ran on macOS with Rust 1.95.0 and libvpx 1.16.0.

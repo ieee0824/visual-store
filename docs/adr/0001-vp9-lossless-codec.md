@@ -6,7 +6,7 @@
 
 ## Decision
 
-Use the VP9 encoder and decoder APIs in the system-linked libvpx library for the first temporal codec. Pin the Rust binding to `libvpx-native-sys` 5.0.17 and enable it in normal builds. The validation baseline is the official libvpx tag `v1.16.0` (runtime version `v1.16.0`). Obtain the actual linked version and build configuration with `libvpx_version()` and `libvpx_build_config()`, and record the runtime version in the encoder descriptor.
+Use the VP9 encoder and decoder APIs in the system-linked libvpx library for the first temporal codec. Pin the Rust binding to `libvpx-native-sys` 5.0.17 and enable it in normal builds. The supported system libvpx range is 1.12.0 through 1.16.0. Validation includes Debian 12 ARM64 with libvpx 1.12.0 and the official libvpx tag `v1.16.0` (runtime version `v1.16.0`). Obtain the actual linked version and build configuration with `libvpx_version()` and `libvpx_build_config()`, and record the runtime version in the encoder descriptor.
 
 The Homebrew build used for macOS arm64 acceptance testing reported this runtime configuration: `--prefix=/opt/homebrew/Cellar/libvpx/1.16.0 --disable-dependency-tracking --disable-examples --disable-unit-tests --enable-pic --enable-runtime-cpu-detect --enable-shared --enable-vp9-highbitdepth --target=arm64-darwin25-gcc`. CI records each runner's configuration in the `vp9_roundtrip` example JSON.
 

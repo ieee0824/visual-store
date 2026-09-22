@@ -4,59 +4,59 @@
 vstore [--store PATH] COMMAND
 ```
 
-`--store` > `VSTORE_ROOT` > `$CWD/.visual-store`。上位ディレクトリは探索しない。
-`--help`・`--version`以外はstdoutにUTF-8 JSON一件。正常は`{schema_version:2,ok:true,data:{...}}`、異常は`{schema_version:2,ok:false,error:{code,message,retryable}}`。
+Store selection follows `--store` > `VSTORE_ROOT` > `$CWD/.visual-store`. Parent directories are not searched.
+Except for `--help` and `--version`, stdout contains one UTF-8 JSON object. Success has the form `{schema_version:2,ok:true,data:{...}}`; errors have the form `{schema_version:2,ok:false,error:{code,message,retryable}}`.
 
-## コマンド
+## Commands
 
-| コマンド | 役割・引数 |
+| Command | Purpose and arguments |
 | --- | --- |
-| `init` | 未作成または空の専用ディレクトリを初期化。正常storeはIDを維持 |
-| `put --file PATH` | PNG登録。`--run`、`--stream`、`--label`、`--note`、複数の`--tag`、`--captured-at RFC3339`、`--operation-id`、`--keep-source`、`--compression-level 0..9` |
-| `info REF` | 寸法、メモ、タグ、ハッシュ、保存量、圧縮情報。完全性検査ではない |
-| `features REF` | 保存済みhash・寸法・sizeと、同じrun/streamの直前frameとのpixel一致。画像を展開・表示しない |
-| `list [--run RUN] [--limit N] [--cursor CURSOR]` | 新しい登録順。既定20件、最大100件。stdoutは最大16 KiBで、byte上限時は指定件数未満でもcursorを返す。次ページも同じrun条件を使う |
-| `judgment add REF ...` | 外部判定を追加。inline JSON value、`--json FILE`、`--stdin`に対応 |
-| `judgment list REF [--kind K] [--producer P]` | 画像のjudgmentを新しい順に取得 |
-| `judgment search [--kind K] [--producer P] [--value JSON] [--confidence-below N]` | store全体のjudgmentを検索 |
-| `get REF [--variant stored\|source] [--output PATH]` | PNGをコピーして絶対pathを返す。既定はexports配下。画像表示は行わない |
-| `get-frame --run RUN [--stream default] --frame N [--variant stored\|source] [--output PATH]` | frame索引から一枚だけPNGへ復元。segmentと復号範囲を返す |
-| `pack --run RUN [--stream STREAM] [--codec vp9] [--segment-frames 2..128] [--dry-run]` | 完了した列を検証済み不変segmentへ圧縮。不利ならPNGを維持。AV1は未実装で明示エラー |
-| `prune --dry-run\|--apply` | 検証済みretired PNGだけを明示整理。保存やpackの副作用では実行しない |
-| `verify [--report NEW_FILE]` | PNGと共有segmentの整合性検査。要約と最大20件の問題例。全問題はreportへ書く |
-| `migrate --to 2 [--resume\|--restore]` | v1 storeを明示移行。中断は再開またはv1へ復元 |
-| `migrate --to 3 [--resume\|--restore]` | v2 storeへjudgment schemaを追加。中断は再開またはv2へ復元 |
+| `init` | Initialize a new or empty dedicated directory. Preserve the ID of a valid existing store. |
+| `put --file PATH` | Register a PNG. Supports `--run`, `--stream`, `--label`, `--note`, repeated `--tag`, `--captured-at RFC3339`, `--operation-id`, `--keep-source`, and `--compression-level 0..9`. |
+| `info REF` | Return dimensions, notes, tags, hashes, storage sizes, and compression information. This is not an integrity check. |
+| `features REF` | Return stored hashes, dimensions, size, and pixel equality with the previous frame in the same run and stream. Does not decode or display the image. |
+| `list [--run RUN] [--limit N] [--cursor CURSOR]` | List newest registrations first. Default 20, maximum 100. Stdout is capped at 16 KiB; a byte limit may produce a cursor before the requested item count. Use the same run filter on the next page. |
+| `judgment add REF ...` | Add an external judgment using an inline JSON value, `--json FILE`, or `--stdin`. |
+| `judgment list REF [--kind K] [--producer P]` | List judgments for an image, newest first. |
+| `judgment search [--kind K] [--producer P] [--value JSON] [--confidence-below N]` | Search judgments across a store. |
+| `get REF [--variant stored\|source] [--output PATH]` | Copy a PNG and return its absolute path. The default destination is under exports. Does not display the image. |
+| `get-frame --run RUN [--stream default] --frame N [--variant stored\|source] [--output PATH]` | Reconstruct one PNG by frame index. Returns the segment and decode range. |
+| `pack --run RUN [--stream STREAM] [--codec vp9] [--segment-frames 2..128] [--dry-run]` | Compress a completed sequence into verified immutable segments. Keep PNGs when compression is unfavorable. AV1 is unimplemented and returns an explicit error. |
+| `prune --dry-run\|--apply` | Explicitly remove only verified retired PNGs. Storing and packing do not trigger it. |
+| `verify [--report NEW_FILE]` | Check PNG and shared-segment integrity. Return a summary and up to 20 issue examples; write all issues to the report. |
+| `migrate --to 2 [--resume\|--restore]` | Explicitly migrate a v1 store. Resume an interrupted migration or restore v1. |
+| `migrate --to 3 [--resume\|--restore]` | Add the judgment schema to a v2 store. Resume an interrupted migration or restore v2. |
 
-REFは`visual://STORE_UUID/images/IMAGE_UUID`または選択store内のIMAGE_UUID。
-getとreportは出力先が既存ファイル・symlinkなら上書きせず失敗する。
-sourceは登録時に`--keep-source`を付けた場合のみ取得できる。
-streamはrunがある場合のみ指定でき、runあり・stream省略時は`default`。`(run, stream)`ごとに0始まりの`frame_no`を割り当てる。明示した空streamは拒否する。
-get/get-frameはactive表現がPNGでもVP9でも検証済みPNGを返し、常に`displayed:false`。動画復号不能なbuildは`E_CODEC_UNAVAILABLE`を返す。
-infoの`shared_representation_bytes`は複数画像で共有され得るため、画像ごとに合計しない。
-Jev連携とVision escalationは[Jev adapter](jev-adapter.md)を参照。`put`や他のcore commandはJevを呼ばない。
+A REF is either `visual://STORE_UUID/images/IMAGE_UUID` or an IMAGE_UUID in the selected store.
+`get` and `verify --report` fail rather than overwrite an existing file or symlink.
+The source variant is available only when registration used `--keep-source`.
+A stream requires a run; with a run but no stream, the stream is `default`. Each `(run, stream)` has its own zero-based `frame_no`. An explicitly empty stream is rejected.
+`get` and `get-frame` return a verified PNG and always report `displayed:false`, whether the active representation is PNG or VP9. A build that cannot decode video returns `E_CODEC_UNAVAILABLE`.
+The `shared_representation_bytes` field from `info` may be shared by several images, so do not sum it per image.
+See the [Jev adapter](jev-adapter.md) for Jev integration and vision escalation. `put` and other core commands do not call Jev.
 
-## 再試行
+## Retries
 
-同じ操作ID・同じ元バイトと登録オプションなら同じimage IDを返す。
-タグは並べ替え・重複除去し、空のrun/label/noteは省略と同一視する。
-時刻はUTCへ正規化し、圧縮levelは既定値を補って比較する。入力パスは比較対象外。
-操作IDはstore内で一意、1〜128 UTF-8 bytes。変更した登録内容で同じIDを使うと`E_CONFLICT`。
-元入力がなくなった場合、操作IDだけでは再試行できない。保存済みrefからinfo/getを使う。
+The same operation ID, original bytes, and registration options return the same image ID.
+Tags are sorted and deduplicated; empty run, label, and note values are treated as absent.
+Times are normalized to UTC, and the default compression level is included in comparisons. The input path is excluded.
+An operation ID must be unique within a store and contain 1–128 UTF-8 bytes. Reusing it with changed registration content returns `E_CONFLICT`.
+If the original input is gone, the operation ID alone cannot retry registration. Use `info` or `get` on the saved reference.
 
-## 入力上限
+## Input limits
 
-対応は静止PNG、非インターレース、8-bit RGB/RGBA。APNG・パレット・グレースケール・16-bitは非対応。
-ファイル64 MiB、最大辺16384、総画素16777216、走査線展開128 MiB、メモリ見積もり256 MiB。
-複合したメモリ見積もりで拒否するため、寸法条件だけでは受け入れを保証しない。
-runとstreamは各128、label 256、note 2048 UTF-8 bytes、タグ16件・各64 bytes。さらにJSONエスケープ後のメタデータ合計を制限する。
+Supported inputs are static, non-interlaced, 8-bit RGB/RGBA PNGs. APNG, palette, grayscale, and 16-bit PNGs are unsupported.
+Limits are 64 MiB per file, 16,384 per edge, 16,777,216 total pixels, 128 MiB inflated scanlines, and 256 MiB estimated memory.
+The combined memory estimate can reject an image that meets the dimension limits.
+Run and stream are limited to 128 UTF-8 bytes each; label to 256; note to 2,048; and tags to 16 entries of 64 bytes each. Total JSON-escaped metadata is also limited.
 
-必要な場合に限り、利用者の指定に従って有限のグローバルオプションを使う：
-`--max-source-bytes`、`--max-edge`、`--max-pixels`、`--max-inflated-bytes`、`--max-memory-bytes`。
-既定上限を超えて登録した画像は、get/verify時にも必要な上限を明示する。
+Use finite global limit options only when needed and as directed by the user:
+`--max-source-bytes`, `--max-edge`, `--max-pixels`, `--max-inflated-bytes`, `--max-memory-bytes`.
+Images registered above default limits require the appropriate limits on later `get` and `verify` calls too.
 
-## エラー
+## Errors
 
-| 終了コード | 主なcode |
+| Exit status | Main codes |
 | --- | --- |
 | 2 | `E_INVALID_ARGUMENT`, `E_INVALID_IMAGE`, `E_LIMIT_EXCEEDED`, `E_INVALID_CURSOR` |
 | 3 | `E_NOT_FOUND`, `E_STORE_NOT_INITIALIZED`, `E_UNSUPPORTED_IMAGE`, `E_UNSUPPORTED_METADATA`, `E_SOURCE_NOT_RETAINED`, `E_CODEC_UNAVAILABLE` |
@@ -64,7 +64,7 @@ runとstreamは各128、label 256、note 2048 UTF-8 bytes、タグ16件・各64 
 | 5 | `E_INTEGRITY`, `E_SCHEMA_VERSION`, `E_STORE_MISMATCH` |
 | 6 | `E_IO`, `E_PERMISSION`, `E_DISK_FULL` |
 
-`E_BUSY`・`E_SOURCE_CHANGED`のみ`retryable:true`。無限再試行しない。
-verifyで整合性問題を検出した場合は終了5、`ok:false`、errorに加えてdataに検査結果を返す。
-pack/pruneの途中失敗も非ゼロ終了と、完了済み範囲を含むdataを返す。
-未参照ファイルは`unreferenced_candidate`として報告するだけで、これだけなら終了0。検査中の登録かもしれないため削除しない。
+Only `E_BUSY` and `E_SOURCE_CHANGED` have `retryable:true`. Do not retry indefinitely.
+When `verify` detects an integrity issue, it exits with status 5 and returns `ok:false` plus inspection results in `data` alongside the error.
+A partial `pack` or `prune` failure also returns a nonzero status and `data` describing completed work.
+Unreferenced files are reported as `unreferenced_candidate` only; by themselves they produce exit status 0. They may belong to an in-progress registration, so do not delete them.

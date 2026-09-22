@@ -221,12 +221,18 @@ impl CodecError {
     fn vpx(
         operation: &'static str,
         code: ffi::vpx_codec_err_t,
-        context: Option<&ffi::vpx_codec_ctx_t>,
+        context: Option<&mut ffi::vpx_codec_ctx_t>,
     ) -> Self {
         let mut message = format!("libvpx returned {code:?}");
         if let Some(context) = context {
-            // SAFETY: libvpx owns both NUL-terminated strings for the lifetime
-            // of the initialized context. We copy immediately.
+            // Older libvpx headers declare these diagnostic getters with a
+            // mutable context pointer. The exclusive borrow permits either
+            // signature without casting away constness or aliasing a shared
+            // Rust reference. Copy both context-owned strings immediately.
+            let context: *mut ffi::vpx_codec_ctx_t = context;
+            // SAFETY: the context is live and exclusively borrowed, including
+            // after an initialization error; libvpx owns the NUL-terminated
+            // diagnostic strings while the context remains live.
             unsafe {
                 for value in [
                     ffi::vpx_codec_error(context),
@@ -301,7 +307,7 @@ impl Encoder {
                 0,
                 ffi::VPX_ENCODER_ABI_VERSION as c_int,
             );
-            check("vpx_codec_enc_init_ver", status, Some(&context))?;
+            check("vpx_codec_enc_init_ver", status, Some(&mut context))?;
             let mut encoder = Self { context };
             encoder.control(
                 ffi::vp8e_enc_control_id::VP9E_SET_LOSSLESS as c_int,
@@ -330,7 +336,7 @@ impl Encoder {
     fn control(&mut self, id: c_int, value: c_int, operation: &'static str) -> Result<()> {
         // SAFETY: these libvpx controls all accept one integer argument.
         let status = unsafe { ffi::vpx_codec_control_(&mut self.context, id, value) };
-        check(operation, status, Some(&self.context))
+        check(operation, status, Some(&mut self.context))
     }
 
     fn encode(
@@ -375,7 +381,7 @@ impl Encoder {
                 ffi::VPX_DL_GOOD_QUALITY as c_ulong,
             )
         };
-        check("vpx_codec_encode", status, Some(&self.context))?;
+        check("vpx_codec_encode", status, Some(&mut self.context))?;
         self.drain()
     }
 
@@ -393,7 +399,7 @@ impl Encoder {
                     ffi::VPX_DL_GOOD_QUALITY as c_ulong,
                 )
             };
-            check("vpx_codec_encode(flush)", status, Some(&self.context))?;
+            check("vpx_codec_encode(flush)", status, Some(&mut self.context))?;
             let batch = self.drain()?;
             if batch.is_empty() {
                 return Ok(packets);
@@ -422,8 +428,10 @@ impl Encoder {
             if frame.buf.is_null() || frame.sz == 0 {
                 return Err(CodecError::input("libvpx returned an empty frame packet"));
             }
-            // SAFETY: libvpx guarantees frame.buf spans frame.sz bytes for this packet.
-            let data = unsafe { std::slice::from_raw_parts(frame.buf.cast::<u8>(), frame.sz) };
+            let packet_len = checked_packet_len(frame.sz)?;
+            // SAFETY: libvpx guarantees frame.buf spans frame.sz bytes for this
+            // packet; packet_len was checked against usize and isize limits.
+            let data = unsafe { std::slice::from_raw_parts(frame.buf.cast::<u8>(), packet_len) };
             packets.push(Packet {
                 data: data.to_vec(),
                 pts: frame.pts,
@@ -469,7 +477,7 @@ impl Decoder {
                 0,
                 ffi::VPX_DECODER_ABI_VERSION as c_int,
             );
-            check("vpx_codec_dec_init_ver", status, Some(&context))?;
+            check("vpx_codec_dec_init_ver", status, Some(&mut context))?;
             Ok(Self { context })
         }
     }
@@ -481,7 +489,7 @@ impl Decoder {
         let status = unsafe {
             ffi::vpx_codec_decode(&mut self.context, packet.as_ptr(), size, ptr::null_mut(), 0)
         };
-        check("vpx_codec_decode", status, Some(&self.context))?;
+        check("vpx_codec_decode", status, Some(&mut self.context))?;
         self.drain()
     }
 
@@ -489,7 +497,7 @@ impl Decoder {
         // SAFETY: null input flushes an initialized decoder.
         let status =
             unsafe { ffi::vpx_codec_decode(&mut self.context, ptr::null(), 0, ptr::null_mut(), 0) };
-        check("vpx_codec_decode(flush)", status, Some(&self.context))?;
+        check("vpx_codec_decode(flush)", status, Some(&mut self.context))?;
         self.drain()
     }
 
@@ -691,13 +699,25 @@ impl SequenceEncoder {
 fn check(
     operation: &'static str,
     status: ffi::vpx_codec_err_t,
-    context: Option<&ffi::vpx_codec_ctx_t>,
+    context: Option<&mut ffi::vpx_codec_ctx_t>,
 ) -> Result<()> {
     if status == ffi::vpx_codec_err_t::VPX_CODEC_OK {
         Ok(())
     } else {
         Err(CodecError::vpx(operation, status, context))
     }
+}
+
+fn checked_packet_len<T: TryInto<usize>>(size: T) -> Result<usize> {
+    let length = size
+        .try_into()
+        .map_err(|_| CodecError::input("libvpx frame packet size is not representable"))?;
+    if length > isize::MAX as usize {
+        return Err(CodecError::input(
+            "libvpx frame packet size exceeds addressable memory",
+        ));
+    }
+    Ok(length)
 }
 
 fn checked_pixels(width: u32, height: u32) -> Result<usize> {
@@ -1079,4 +1099,28 @@ unsafe fn copy_i444(image: &ffi::vpx_image_t) -> Result<PlanarFrame> {
         height,
         planes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packet_length_rejects_unrepresentable_and_unaddressable_values() {
+        assert_eq!(checked_packet_len(42u64).unwrap(), 42);
+        assert!(checked_packet_len(u128::MAX).is_err());
+        assert!(checked_packet_len((isize::MAX as u128) + 1).is_err());
+    }
+
+    #[test]
+    fn diagnostic_getters_accept_an_exclusive_initialized_context() {
+        let mut encoder = Encoder::new(16, 16).unwrap();
+        let error = check(
+            "diagnostic probe",
+            ffi::vpx_codec_err_t::VPX_CODEC_ERROR,
+            Some(&mut encoder.context),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("diagnostic probe"));
+    }
 }

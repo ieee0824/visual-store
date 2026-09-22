@@ -12,7 +12,9 @@ MVPは、非インターレースの静止8-bit RGB/RGBA PNGに対応してい�
 
 ## インストール
 
-現在の安定版Rustツールチェーン、Cコンパイラー、`pkg-config`、libvpx開発packageが必要です。対応するsystem libvpxの範囲は1.12.0〜1.16.0です。
+GitHub Releasesの`vX.Y.Z`タグから、OS・CPUに合う`vstore-vX.Y.Z-<target>.tar.gz`をダウンロードできます。展開した`vstore`をPATH上に置いてください。配布版はlibvpxを静的リンクしているため、実行時にlibvpxの別途インストールは不要です。Linux版はDebian 12 (glibc 2.36)をビルド基準とします。各アーカイブにはライセンス通知を同梱し、`SHA256SUMS`で照合できます。
+
+ソースからインストールする場合は、現在の安定版Rustツールチェーン、Cコンパイラー、`pkg-config`、libvpx開発packageが必要です。対応するsystem libvpxの範囲は1.12.0〜1.16.0です。
 
 ```bash
 # macOS
@@ -123,7 +125,11 @@ cargo run --locked --example vp9_roundtrip
 
 Visual StoreはMITライセンスです。VP9 backendはBSD 3-Clauseのsystem libvpxを、MPL-2.0の`libvpx-native-sys` 5.0.17から呼び出します。ほかの実行時直接依存は`base64`、`chrono`、`clap`、`crc32fast`、`flate2`、`libc`、`png`、`rusqlite`、`serde`、`serde_json`、`sha2`、`uuid`です。これらはMIT、Apache-2.0または互換ライセンスで提供され、`rusqlite`はMIT、バンドルされるSQLiteはパブリックドメインです。テスト専用依存は`tempfile`と`jsonschema`です。解決済みの正確なRust crate版は`Cargo.lock`へ記録しています。採用版、可逆plane配置、system libraryの再現手順は[VP9 codec ADR](docs/adr/0001-vp9-lossless-codec.md)に記録しています。
 
-再配布前に、対象成果物の推移的依存関係とライセンス通知をすべて監査してください。このプロジェクトはサードパーティーのソースやライセンスファイルをvendorしていません。
+リリースアーカイブにはVisual Storeとlibvpxのライセンス、およびCargo依存関係のライセンス一覧と入手できるライセンスファイルを同梱します。再配布時には対象成果物の推移的依存関係と通知を確認してください。開発用ソースにはlibvpxのライセンス文のみを同梱し、サードパーティーのソースはvendorしていません。
+
+## リリース
+
+`Cargo.toml`のversionと同じ`vX.Y.Z`タグをmain上のコミットに付けてpushすると、GitHub ActionsがLinux/macOSのx86_64・ARM64をビルドし、VP9の動作と動的codec依存がないことを確認してGitHub Releaseへ公開します。ワークフローのpull requestでは同じビルドを実行しますが公開はしません。タグがversionと一致しない場合やmain上にない場合は公開を止めます。
 
 ## 対応環境
 

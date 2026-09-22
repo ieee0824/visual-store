@@ -12,7 +12,9 @@ This repository started as a Rust 2024 project. Rust gives the parser checked ar
 
 ## Install
 
-Requirements: a current stable Rust toolchain, a C compiler, `pkg-config`, and the libvpx development package. The supported system libvpx range is 1.12.0 through 1.16.0.
+Download `vstore-vX.Y.Z-<target>.tar.gz` for your OS and CPU from the `vX.Y.Z` GitHub Release, then put the extracted `vstore` on your PATH. Release builds statically link libvpx, so a separate libvpx runtime is not required. Linux releases are built against Debian 12 (glibc 2.36). Each archive includes license notices and can be checked against `SHA256SUMS`.
+
+For a source installation, requirements are a current stable Rust toolchain, a C compiler, `pkg-config`, and the libvpx development package. The supported system libvpx range is 1.12.0 through 1.16.0.
 
 ```bash
 # macOS
@@ -127,7 +129,11 @@ Performance depends on image contents and hardware. Use [the benchmark procedure
 
 Visual Store is licensed under MIT. The VP9 backend calls the BSD 3-Clause system libvpx through `libvpx-native-sys` 5.0.17, which is MPL-2.0. Other direct runtime dependencies are `base64`, `chrono`, `clap`, `crc32fast`, `flate2`, `libc`, `png`, `rusqlite`, `serde`, `serde_json`, `sha2`, and `uuid`. They use MIT, Apache-2.0, or compatible terms; `rusqlite` is MIT and its bundled SQLite library is public domain. Test-only dependencies are `tempfile` and `jsonschema`. Exact resolved Rust crate versions are committed in `Cargo.lock`. The selected versions, reversible plane mapping, and system-library reproduction steps are recorded in the [VP9 codec ADR](docs/adr/0001-vp9-lossless-codec.md).
 
-Before redistribution, audit the complete transitive dependency graph and notices for the target artifact. The project does not vendor third-party source or license files.
+Release archives include the Visual Store and libvpx licenses, plus a list of Cargo dependencies and their available license files. Check the transitive dependencies and notices for your target artifact before redistributing it. The development source includes only the libvpx license text, not third-party source.
+
+## Release
+
+Push a `vX.Y.Z` tag matching the `Cargo.toml` version on a main-branch commit. GitHub Actions builds x86_64 and ARM64 binaries for Linux and macOS, checks VP9 operation and the absence of dynamic codec dependencies, then publishes a GitHub Release. Pull requests run the same builds without publishing. A mismatched version or a tag outside main prevents publication.
 
 ## Platform status
 

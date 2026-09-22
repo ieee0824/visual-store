@@ -44,7 +44,7 @@ The Rust `SequenceEncoder` accepts one frame's samples at a time and does not re
 
 ## Build approach
 
-Do not vendor libvpx into the distributable. Link dynamically against the system libvpx found by `pkg-config`. Standard setup for macOS and Linux:
+Development builds link dynamically against the system libvpx found by `pkg-config`. Tagged release binaries set `VPX_STATIC=1` to link the system-provided static libvpx and include its BSD 3-Clause license in the archive; they do not vendor libvpx source. Standard setup for macOS and Linux:
 
 ```bash
 # macOS (Homebrew)
@@ -80,7 +80,7 @@ make install
 PKG_CONFIG_PATH="$PWD/out/lib/pkgconfig" cargo test --manifest-path ../Cargo.toml --locked
 ```
 
-On macOS, a source build also requires `DYLD_LIBRARY_PATH=$PWD/out/lib` at runtime. On Linux, set `LD_LIBRARY_PATH=$PWD/out/lib`. CI installs system packages on both platforms, runs the round-trip example with an empty `PATH`, and checks that the artifact dynamically depends on libvpx but not libav or FFmpeg.
+On macOS, a source build also requires `DYLD_LIBRARY_PATH=$PWD/out/lib` at runtime. On Linux, set `LD_LIBRARY_PATH=$PWD/out/lib`. Development CI installs system packages on both platforms, runs the round-trip example with an empty `PATH`, and checks that the artifact dynamically depends on libvpx but not libav or FFmpeg. Release CI instead verifies that its binary has no dynamic codec dependency.
 
 ## Versions and licenses
 

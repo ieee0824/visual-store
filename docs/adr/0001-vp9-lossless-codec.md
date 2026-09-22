@@ -1,55 +1,50 @@
-# ADR 0001: libvpxによる可逆VP9コーデック基盤
+# ADR 0001: Lossless VP9 codec foundation with libvpx
 
-- 状態: 採用
-- 日付: 2026-09-15
-- 対象: temporal codec foundation v1
+- Status: Accepted
+- Date: 2026-09-15
+- Scope: temporal codec foundation v1
 
-## 決定
+## Decision
 
-最初の時間方向コーデックには、system libraryとしてリンクするlibvpxのVP9 encoder/decoder APIを使う。Rust側は`libvpx-native-sys` 5.0.17へ正確に固定し、通常ビルドで常に有効にする。検証基準のlibvpxは公式tag `v1.16.0`（runtime version `v1.16.0`）である。実際にリンクした版とbuild configurationは`libvpx_version()`と`libvpx_build_config()`で取得でき、encoder descriptorにもruntime versionを記録する。
+Use the VP9 encoder and decoder APIs in the system-linked libvpx library for the first temporal codec. Pin the Rust binding to `libvpx-native-sys` 5.0.17 and enable it in normal builds. The validation baseline is the official libvpx tag `v1.16.0` (runtime version `v1.16.0`). Obtain the actual linked version and build configuration with `libvpx_version()` and `libvpx_build_config()`, and record the runtime version in the encoder descriptor.
 
-macOS arm64で受け入れ試験に使ったHomebrew buildのruntime configurationは`--prefix=/opt/homebrew/Cellar/libvpx/1.16.0 --disable-dependency-tracking --disable-examples --disable-unit-tests --enable-pic --enable-runtime-cpu-detect --enable-shared --enable-vp9-highbitdepth --target=arm64-darwin25-gcc`である。CIでは各runnerのconfigurationを`vp9_roundtrip` exampleのJSONへ記録する。
+The Homebrew build used for macOS arm64 acceptance testing reported this runtime configuration: `--prefix=/opt/homebrew/Cellar/libvpx/1.16.0 --disable-dependency-tracking --disable-examples --disable-unit-tests --enable-pic --enable-runtime-cpu-detect --enable-shared --enable-vp9-highbitdepth --target=arm64-darwin25-gcc`. CI records each runner's configuration in the `vp9_roundtrip` example JSON.
 
-FFI型、可変長control呼び出し、`unsafe`、codec contextの寿命、image stride、libvpx所有packetのコピーは`src/codec/vp9.rs`だけに閉じ込める。`vpxenc`、`vpxdec`、FFmpeg CLI、`libavcodec`、`libavformat`、`libswscale`は使用しない。
+Confine FFI types, variadic control calls, `unsafe`, codec context lifetimes, image strides, and copies of libvpx-owned packets to `src/codec/vp9.rs`. Do not use `vpxenc`, `vpxdec`, the FFmpeg CLI, `libavcodec`, `libavformat`, or `libswscale`.
 
-## 可逆plane layout v1
+## Lossless plane layout v1
 
-通常動画向けのRGB/YUV変換は行わない。8-bit packed RGBをVP9 profile 1のfull-resolution I444へ次のように並べ替える。
+Do not perform the RGB/YUV conversion used for ordinary video. Rearrange 8-bit packed RGB into full-resolution I444 in VP9 profile 1 as follows:
 
-| 入力sample | VP9 color stream |
+| Input sample | VP9 color stream |
 | --- | --- |
 | R | plane 0 |
 | G | plane 1 |
 | B | plane 2 |
 
-RGBAではRGBを同じcolor streamへ格納し、alphaは別のlossless I444 streamのplane 0へ格納する。alpha streamのplane 1と2はすべて0に固定し、decode時にも0であることを検証する。premultiply、subsampling、limited-range変換、resize、denoiseは行わないため、alpha=0の画素にある非0のRGBも保持する。
+For RGBA, store RGB in the same color stream and alpha in plane 0 of a separate lossless I444 stream. Set planes 1 and 2 of the alpha stream to zero and verify they remain zero on decode. Do not premultiply, subsample, convert to limited range, resize, or denoise. This preserves nonzero RGB values even in pixels with alpha 0.
 
-descriptor version 1は次を固定する。
+Descriptor version 1 fixes these values:
 
 - codec: `vp9`
-- profile: `1`（8-bit I444）
+- profile: `1` (8-bit I444)
 - bit depth: `8`
 - color layout: `rgb_planar_i444_direct_v1`
-- alpha layout: RGBではなし、RGBAでは`alpha_in_i444_plane0_v1`
+- alpha layout: none for RGB; `alpha_in_i444_plane0_v1` for RGBA
 - color metadata: `srgb_full_range_no_conversion`
 - lossless: `true`
 
-これはVisual Store内部の可逆なsample配置であり、一般的な動画プレイヤーへそのまま渡して正しいRGB表示になる形式ではない。container、永続化、PNG再構築情報は後続のsegment実装が担当する。
+This is an internal, lossless Visual Store sample layout. A general video player will not display its RGB colors correctly without conversion. Later segment work handles the container, persistence, and PNG reconstruction information.
 
-## Encoder設定とinter-frameの検証
+## Encoder settings and inter-frame verification
 
-一つのstreamの全frameを同じencoder contextへ順に渡す。`VP9E_SET_LOSSLESS=1`、quantizer 0、lag 0、1 thread、timebase 1/30、keyframe最大間隔128を用い、先頭だけを明示的なkeyframeにする。テストはpacket flagだけに依存しない。decoder APIの`vpx_codec_peek_stream_info`で圧縮済みpacket headerがnon-keyであることを確認し、そのpacketが先行frame列と同じdecoder contextなら完全復号できる一方、新規decoderへ単独で渡すと復号できないことを要求する。これにより、設定値やpacket flagの自己申告だけでなく、実際に先行decoder stateを必要とするbitstreamであることを示す。
+Feed all frames in one stream to the same encoder context in order. Use `VP9E_SET_LOSSLESS=1`, quantizer 0, lag 0, one thread, a 1/30 timebase, and a maximum keyframe interval of 128; explicitly mark only the first frame as a keyframe. Tests must not rely solely on packet flags. Use the decoder API's `vpx_codec_peek_stream_info` to verify that a compressed packet header is non-key. Require that the packet decodes exactly in a decoder context that has received the preceding frames, but fails to decode on its own in a fresh decoder. This demonstrates a bitstream that actually depends on prior decoder state, beyond encoder settings or packet flags.
 
-Rust側の`SequenceEncoder`は一枚ずつsampleを受け取り、呼び出し完了後に入力
-bufferを保持しない。colorとalphaは同じframe順で二つのcontextへ逐次投入する。
-取得・全体検証もdecoder出力を一枚ずつ組み立て、全segment分の展開RGB/RGBAを
-同時保持しない。libvpx内部の参照面はallocator-levelのhard capを設定できないため、
-寸法、stream数、有限の参照面数、作業buffer、container、補助情報から保守的に
-事前拒否し、実際のpeak RSSをbenchmarkで記録する。
+The Rust `SequenceEncoder` accepts one frame's samples at a time and does not retain the input buffer after the call returns. Feed color and alpha sequentially to their two contexts in the same frame order. Retrieval and full verification also assemble decoder output one frame at a time rather than holding decompressed RGB/RGBA for an entire segment. Libvpx reference surfaces cannot be given an allocator-level hard cap. Conservatively reject work in advance based on dimensions, stream count, a bounded number of reference surfaces, working buffers, container, and auxiliary information, and record actual peak RSS in benchmarks.
 
-## ビルド方式
+## Build approach
 
-配布物へlibvpxをvendorしない。`pkg-config`で見つかるsystem libvpxへ動的リンクする。macOSとLinuxの通常セットアップは次のとおり。
+Do not vendor libvpx into the distributable. Link dynamically against the system libvpx found by `pkg-config`. Standard setup for macOS and Linux:
 
 ```bash
 # macOS (Homebrew)
@@ -63,7 +58,7 @@ pkg-config --modversion vpx
 cargo test --locked
 ```
 
-検証基準と同じlibvpx 1.16.0をsourceから再現する場合は、公式tagをcheckoutして共有libraryを構築し、その`.pc`をRust buildへ渡す。
+To reproduce the libvpx 1.16.0 validation baseline from source, check out the official tag, build a shared library, and pass its `.pc` file to the Rust build.
 
 ```bash
 git clone --depth 1 --branch v1.16.0 https://chromium.googlesource.com/webm/libvpx
@@ -85,18 +80,16 @@ make install
 PKG_CONFIG_PATH="$PWD/out/lib/pkgconfig" cargo test --manifest-path ../Cargo.toml --locked
 ```
 
-macOSでsource buildを使う場合は実行時にも`DYLD_LIBRARY_PATH=$PWD/out/lib`を設定する。Linuxでは`LD_LIBRARY_PATH=$PWD/out/lib`を設定する。CIはmacOSとLinuxでsystem packageを導入し、`PATH`を空にした往復exampleと、成果物の動的依存にlibvpxが存在しlibav/FFmpegが存在しないことを検査する。
+On macOS, a source build also requires `DYLD_LIBRARY_PATH=$PWD/out/lib` at runtime. On Linux, set `LD_LIBRARY_PATH=$PWD/out/lib`. CI installs system packages on both platforms, runs the round-trip example with an empty `PATH`, and checks that the artifact dynamically depends on libvpx but not libav or FFmpeg.
 
-## Versionとライセンス
+## Versions and licenses
 
-- libvpx: 1.16.0 baseline、BSD 3-Clause
-- `libvpx-native-sys`: 5.0.17固定、MPL-2.0
-- Visual Storeから追加したcodec code: リポジトリ本体と同じMIT
+- libvpx: 1.16.0 baseline, BSD 3-Clause
+- `libvpx-native-sys`: pinned to 5.0.17, MPL-2.0
+- Visual Store codec code: MIT, like the rest of the repository
 
-system libvpxのbinaryを再配布する場合は、そのbinaryに対応するlibvpxのcopyright/license noticeを同梱する。`libvpx-native-sys`やその他のRust依存を再配布する場合も`Cargo.lock`で解決された版に対応するnoticeを監査する。
+When redistributing the system libvpx binary, include the copyright and license notices for that binary. When redistributing `libvpx-native-sys` or other Rust dependencies, audit notices for the versions resolved in `Cargo.lock`.
 
 ## AV1
 
-AV1 backendはこの段階では実装しない。CLIは将来の選択を曖昧にしないため
-`--codec av1`を構文上は受理するが、明示的な`E_CODEC_UNAVAILABLE`として拒否し、
-VP9やPNGへ読み替えない。help、CLI文書、テストもこの状態を公開する。
+The AV1 backend is not implemented at this stage. The CLI parses `--codec av1` to keep future selection unambiguous, but rejects it explicitly with `E_CODEC_UNAVAILABLE` rather than substituting VP9 or PNG. Help text, CLI documentation, and tests expose this behavior.
